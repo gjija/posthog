@@ -8,6 +8,7 @@ import { FEATURE_FLAGS } from 'lib/constants'
 import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
 
 import { WorkflowIdeaCard } from './WorkflowIdeaCard'
+import { WorkflowIdeaInProgressCard } from './WorkflowIdeaInProgressCard'
 import { workflowIdeasLogic } from './workflowIdeasLogic'
 
 /** Workflows PostHog drafted for this project from its own events, shown until each is used or dismissed. */
@@ -31,6 +32,7 @@ function WorkflowIdeasSection(): JSX.Element | null {
     if (!ideas?.length) {
         return null
     }
+    const inProgress = ideas.filter((idea) => idea.status === 'accepted' && idea.hog_flow_id)
     // Three ideas at most, so the row never wraps. Using or dismissing one brings in the next.
     const suggested = ideas.filter((idea) => idea.status === 'suggested').slice(0, 3)
 
@@ -49,6 +51,13 @@ function WorkflowIdeasSection(): JSX.Element | null {
                     </span>
                 </div>
             </div>
+            {inProgress.length > 0 && (
+                <div className="flex flex-col gap-2">
+                    {inProgress.map((idea) => (
+                        <WorkflowIdeaInProgressCard key={idea.id} idea={idea} hogFlowId={idea.hog_flow_id as string} />
+                    ))}
+                </div>
+            )}
             {suggested.length > 0 && (
                 <div
                     className={clsx(
@@ -62,8 +71,8 @@ function WorkflowIdeasSection(): JSX.Element | null {
                         <WorkflowIdeaCard
                             key={idea.id}
                             idea={idea}
-                            // The list puts the best first bet first. A lone idea needs no pointer.
-                            recommended={index === 0 && suggested.length > 1}
+                            // The list puts the best first bet first. A lone idea or a draft in progress needs no pointer.
+                            recommended={index === 0 && suggested.length > 1 && inProgress.length === 0}
                         />
                     ))}
                 </div>
