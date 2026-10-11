@@ -3204,6 +3204,10 @@ export const WorkflowIdeasAcceptBody = /* @__PURE__ */ zod.object({
     hog_flow_id: zod
         .uuid()
         .describe("The draft workflow created from this idea's definition, with origin_product 'ideas'."),
+    site_url: zod
+        .url()
+        .nullish()
+        .describe('The website the person entered for the email buttons, when PostHog had none for the project.'),
 })
 
 /**
