@@ -655,3 +655,43 @@ class EmailDraft:
     text: str
     generated_by: EmailDraftOrigin
     fallback_reason: EmailDraftFallbackReason | None = None
+
+
+@frozen
+class NewWorkflowIdea:
+    """A whole workflow to suggest to a project. `definition` is in the shape the workflow create endpoint takes."""
+
+    key: str
+    title: str
+    rationale: str
+    value_tier: str
+    definition: dict[str, Any]
+    evidence: dict[str, Any]
+
+
+@frozen
+class WorkflowIdeaRecord:
+    id: UUID
+    team_id: int
+    key: str
+    title: str
+    rationale: str
+    value_tier: str
+    status: str
+    evidence: dict[str, Any]
+    definition: dict[str, Any]
+    created_at: datetime
+    hog_flow_id: UUID | None
+    resolved_at: datetime | None
+
+
+class WorkflowIdeaNotFound(Exception):
+    pass
+
+
+class WorkflowIdeaAlreadyResolved(Exception):
+    pass
+
+
+class WorkflowIdeaWorkflowMismatch(Exception):
+    pass
