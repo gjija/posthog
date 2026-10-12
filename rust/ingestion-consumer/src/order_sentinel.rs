@@ -1,5 +1,4 @@
-//! The per-key send-order sentinel and the consumer's rdkafka context. The
-//! commit sentinel lives in [`crate::commit_sentinel`].
+//! The per-key send-order sentinel and the consumer's rdkafka context.
 //!
 //! **Per-key send order** ([`KeyOrderSentinel`]): for every routing key
 //! (the Kafka message key), messages must be handed to workers in Kafka offset
@@ -32,7 +31,6 @@ use rdkafka::{ClientContext, Statistics, TopicPartitionList};
 use tracing::{info, warn};
 
 use crate::commit_pacer::CommitPacer;
-use crate::commit_sentinel::CommitSentinel;
 use crate::types::SerializedKafkaMessage;
 use common_kafka_consumer::{AssignmentEpoch, TopicOffsetLedger, TopicPartition};
 
@@ -376,14 +374,8 @@ impl Drop for SentinelBatch<'_> {
     }
 }
 
-/// The consumer's rdkafka context: observes async commit results (a
-/// fire-and-forget `CommitMode::Async` failure is otherwise invisible until
-/// restart-time redelivery), forgets revoked partitions around rebalances, and
-/// exports librdkafka's internal statistics (see [`crate::kafka_stats`]).
 pub struct SentinelContext {
-    /// Where the consumer's frontiers go. Held here so the rebalance
-    /// callbacks tell it which partitions leave the assignment.
-    commit_sentinel: Arc<CommitSentinel>,
+    commit_pacer: Arc<CommitPacer>,
     /// The offset ledger the commit path settles against. Owned here so the
     /// rebalance callbacks forget partitions on the same ledger.
     topic_offset_ledger: Arc<TopicOffsetLedger>,
@@ -401,11 +393,11 @@ pub type RevokeHook = Box<dyn Fn(&[(String, i32)]) + Send + Sync>;
 
 impl SentinelContext {
     pub fn new(
-        commit_sentinel: Arc<CommitSentinel>,
+        commit_pacer: Arc<CommitPacer>,
         topic_offset_ledger: Arc<TopicOffsetLedger>,
     ) -> Self {
         Self {
-            commit_sentinel,
+            commit_pacer,
             topic_offset_ledger,
             assignment_epoch: None,
             revoke_hook: OnceLock::new(),
@@ -424,17 +416,12 @@ impl SentinelContext {
         self.assignment_epoch = Some(epoch);
     }
 
-    /// A context with its own free-standing sentinel and ledger, for tests
-    /// and tools that build the Kafka consumer separately from the dispatcher.
     pub fn detached(commit_pacer: CommitPacer) -> Self {
-        Self::new(
-            Arc::new(CommitSentinel::new(commit_pacer)),
-            Arc::new(TopicOffsetLedger::new()),
-        )
+        Self::new(Arc::new(commit_pacer), Arc::new(TopicOffsetLedger::new()))
     }
 
-    pub fn commit_sentinel(&self) -> Arc<CommitSentinel> {
-        Arc::clone(&self.commit_sentinel)
+    pub fn commit_pacer(&self) -> Arc<CommitPacer> {
+        Arc::clone(&self.commit_pacer)
     }
 
     pub fn topic_offset_ledger(&self) -> Arc<TopicOffsetLedger> {
@@ -451,7 +438,7 @@ impl SentinelContext {
             .iter()
             .map(|e| TopicPartition::new(e.topic(), e.partition()))
             .collect();
-        self.commit_sentinel.forget_partitions(&topic_partitions);
+        self.commit_pacer.forget_partitions(&topic_partitions);
     }
 }
 
@@ -531,8 +518,6 @@ impl ConsumerContext for SentinelContext {
     // conf-level `offset_commit_cb` is registered (rust-rdkafka never does) or
     // when the commit is synchronous (a replyq is attached); manual async
     // commits silently drop their result (`rd_kafka_cgrp_propagate_commit_result`).
-    // Commit success is instead verified by the consumer's commit monitor via
-    // `CommitSentinel::observe_broker_committed`.
 }
 
 #[cfg(test)]
