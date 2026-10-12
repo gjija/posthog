@@ -16,7 +16,7 @@ from products.workflows.backend.facade.contracts import (
     WorkflowIdeaNotFound,
     WorkflowIdeaWorkflowMismatch,
 )
-from products.workflows.backend.facade.enums import WorkflowIdeaStatus, WorkflowIdeaValueTier
+from products.workflows.backend.facade.enums import WorkflowIdeaStatus
 from products.workflows.backend.facade.workflow_ideas import accept_idea, dismiss_idea, list_open_ideas, mark_viewed
 
 
@@ -45,9 +45,6 @@ class WorkflowIdeaSerializer(serializers.Serializer):
     key = serializers.CharField(help_text="Stable name of the idea within the project.")
     title = serializers.CharField(help_text="Short name of the suggested workflow.")
     rationale = serializers.CharField(help_text="Why this workflow is worth running.")
-    value_tier = serializers.ChoiceField(
-        choices=WorkflowIdeaValueTier.choices, help_text="How close the workflow's goal is to revenue."
-    )
     status = serializers.ChoiceField(choices=WorkflowIdeaStatus.choices, help_text="Where the idea stands.")
     evidence = WorkflowIdeaEvidenceSerializer(help_text="The numbers behind the idea.")
     definition = WorkflowDefinitionField(

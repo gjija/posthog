@@ -664,7 +664,6 @@ class NewWorkflowIdea:
     key: str
     title: str
     rationale: str
-    value_tier: str
     definition: dict[str, Any]
     evidence: dict[str, Any]
 
@@ -676,7 +675,6 @@ class WorkflowIdeaRecord:
     key: str
     title: str
     rationale: str
-    value_tier: str
     status: str
     evidence: dict[str, Any]
     definition: dict[str, Any]

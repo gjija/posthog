@@ -2156,22 +2156,6 @@ export interface EmailDraftApi {
 }
 
 /**
- * * `revenue` - Revenue
- * * `activation` - Activation
- * * `retention` - Retention
- * * `engagement` - Engagement
- */
-export type WorkflowIdeaValueTierEnumApi =
-    (typeof WorkflowIdeaValueTierEnumApi)[keyof typeof WorkflowIdeaValueTierEnumApi]
-
-export const WorkflowIdeaValueTierEnumApi = {
-    Revenue: 'revenue',
-    Activation: 'activation',
-    Retention: 'retention',
-    Engagement: 'engagement',
-} as const
-
-/**
  * * `suggested` - Suggested
  * * `accepted` - Accepted
  * * `dismissed` - Dismissed
@@ -2214,13 +2198,6 @@ export interface WorkflowIdeaApi {
     title: string
     /** Why this workflow is worth running. */
     rationale: string
-    /** How close the workflow's goal is to revenue.
-     *
-     * * `revenue` - Revenue
-     * * `activation` - Activation
-     * * `retention` - Retention
-     * * `engagement` - Engagement */
-    value_tier: WorkflowIdeaValueTierEnumApi
     /** Where the idea stands.
      *
      * * `suggested` - Suggested

@@ -16,8 +16,6 @@ from products.workflows.backend.facade.contracts import (
 from products.workflows.backend.facade.enums import HogFlowOriginProduct
 from products.workflows.backend.models import HogFlow, WorkflowIdea
 
-VALUE_TIER_ORDER = {"revenue": 0, "activation": 1, "retention": 2, "engagement": 3}
-
 
 def _record(row: WorkflowIdea) -> WorkflowIdeaRecord:
     return WorkflowIdeaRecord(
@@ -26,7 +24,6 @@ def _record(row: WorkflowIdea) -> WorkflowIdeaRecord:
         key=row.key,
         title=row.title,
         rationale=row.rationale,
-        value_tier=row.value_tier,
         status=row.status,
         evidence=row.evidence,
         definition=row.definition,
@@ -38,11 +35,11 @@ def _record(row: WorkflowIdea) -> WorkflowIdeaRecord:
 
 def list_open_ideas(*, team_id: int) -> list[WorkflowIdeaRecord]:
     """Ideas still waiting for a decision, the best first bet for the project first."""
-    rows = list(WorkflowIdea.objects.for_team(team_id).filter(status=WorkflowIdea.Status.SUGGESTED))
-    rows.sort(
-        # The idea's own priority first: the author ranks the best first bet for this project.
-        key=lambda row: (row.evidence.get("priority") or 99, VALUE_TIER_ORDER.get(row.value_tier, 99)),
+    rows = list(
+        WorkflowIdea.objects.for_team(team_id).filter(status=WorkflowIdea.Status.SUGGESTED).order_by("created_at")
     )
+    # The idea's own priority first: the author ranks the best first bet for this project.
+    rows.sort(key=lambda row: row.evidence.get("priority") or 99)
     return [_record(row) for row in rows]
 
 
@@ -69,7 +66,6 @@ def create_ideas(
             defaults={
                 "title": item.title,
                 "rationale": item.rationale,
-                "value_tier": item.value_tier,
                 "definition": item.definition,
                 "evidence": item.evidence,
                 "source": source,

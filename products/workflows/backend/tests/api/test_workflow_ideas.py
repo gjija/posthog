@@ -11,7 +11,7 @@ from products.workflows.backend.facade.workflow_ideas import create_ideas
 from products.workflows.backend.models import HogFlow, WorkflowIdea
 
 
-def _idea(key: str, *, priority: int | None = None, value_tier: str = "activation") -> NewWorkflowIdea:
+def _idea(key: str, *, priority: int | None = None) -> NewWorkflowIdea:
     evidence: dict = {
         "trigger_event": "trial started",
         "goal_events": ["plan purchased"],
@@ -25,7 +25,6 @@ def _idea(key: str, *, priority: int | None = None, value_tier: str = "activatio
         key=key,
         title=f"Idea {key}",
         rationale="People who start a trial rarely buy a plan in the first week.",
-        value_tier=value_tier,
         definition={"actions": [], "edges": []},
         evidence=evidence,
     )
@@ -42,13 +41,13 @@ class TestWorkflowIdeasAPI(APIBaseTest):
     def _flow(self, *, team: Team | None = None, origin_product: str | None = "ideas") -> HogFlow:
         return HogFlow.objects.create(team=team or self.team, name="Drafted", origin_product=origin_product)
 
-    def test_list_orders_by_priority_then_tier_and_hides_other_projects(self):
+    def test_list_orders_by_priority_then_age_and_hides_other_projects(self):
         create_ideas(
             team_id=self.team.id,
             items=[
-                _idea("engagement", value_tier="engagement"),
-                _idea("revenue", value_tier="revenue"),
-                _idea("first", priority=1, value_tier="retention"),
+                _idea("older"),
+                _idea("newer"),
+                _idea("first", priority=1),
             ],
             source="manual",
         )
@@ -58,7 +57,7 @@ class TestWorkflowIdeasAPI(APIBaseTest):
         response = self.client.get(self._url())
 
         assert response.status_code == 200, response.json()
-        assert [row["key"] for row in response.json()["results"]] == ["first", "revenue", "engagement"]
+        assert [row["key"] for row in response.json()["results"]] == ["first", "older", "newer"]
 
     @parameterized.expand([("empty", ""), ("whitespace", "  \t")])
     def test_a_blank_key_is_refused_before_anything_is_saved(self, _name: str, key: str):
