@@ -551,8 +551,8 @@ def _advance_backfill_cursor(inputs: AdvanceCursorInputs) -> AdvanceCursorOutput
     # cancelled or completed it and the loop stops. If it is still RUNNING, an earlier attempt of
     # this same advance already committed and only its result was lost, so the loop must carry on
     # from the stored cursor instead of stalling with the window half walked.
-    status = row.values_list("status", flat=True).first()
-    return AdvanceCursorOutput(finished=status != EvaluationBackfillStatus.RUNNING)
+    current_status = row.values_list("status", flat=True).first()
+    return AdvanceCursorOutput(finished=current_status != EvaluationBackfillStatus.RUNNING)
 
 
 @temporalio.activity.defn

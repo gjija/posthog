@@ -1,6 +1,7 @@
 import uuid
 import asyncio
 import dataclasses
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -76,7 +77,7 @@ class _BackfillMocks:
         *,
         activity_results: dict | None = None,
         child_errors_for_ids: dict[str, Exception] | None = None,
-        child_results_for_ids: dict[str, WorkflowResult | Exception | asyncio.Future] | None = None,
+        child_results_for_ids: Mapping[str, WorkflowResult | Exception | asyncio.Future] | None = None,
     ) -> None:
         self.activity_results = activity_results or {}
         self.child_errors_for_ids = child_errors_for_ids or {}
