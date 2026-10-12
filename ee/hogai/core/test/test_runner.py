@@ -1,6 +1,6 @@
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from typing import cast
+from typing import Any, cast
 from uuid import uuid4
 
 from posthog.test.base import BaseTest
@@ -14,7 +14,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 from parameterized import parameterized
 
-from posthog.schema import AssistantEventType, FailureMessage
+from posthog.schema import AssistantEventType, FailureMessage, HumanMessage
 
 from products.posthog_ai.backend.models.assistant import Conversation
 
@@ -828,10 +828,9 @@ class TestRunnerClientToolCallInterrupt(BaseTest):
         self.assertTrue(any(getattr(m, "content", None) == "Please clarify your request" for m in messages))
         mock_graph.aupdate_state.assert_called_once()
 
-    @parameterized.expand([("approve",), ("reject",)])
-    async def test_response_targets_selected_parallel_approval(self, action: str) -> None:
-        executed: list[str] = []
-
+    async def _create_parallel_approvals(
+        self, names: tuple[str, ...], executed: list[str]
+    ) -> tuple[Any, Any, dict[str, Any], dict[str, ApprovalRequest]]:
         def operation(name: str) -> Callable[[AssistantState], dict[str, object]]:
             proposal_id = str(uuid4())
 
@@ -848,7 +847,7 @@ class TestRunnerClientToolCallInterrupt(BaseTest):
             return run
 
         builder = StateGraph(AssistantState)
-        for name in ("first", "second"):
+        for name in names:
             builder.add_node(name, operation(name))
             builder.add_edge(START, name)
             builder.add_edge(name, END)
@@ -862,6 +861,13 @@ class TestRunnerClientToolCallInterrupt(BaseTest):
         approvals = {pending.value.tool_name: pending.value for task in snapshot.tasks for pending in task.interrupts}
         for approval in approvals.values():
             self.conversation.approval_decisions[approval.proposal_id] = {"decision_status": "pending"}
+        await self.conversation.asave(update_fields=["approval_decisions"])
+        return runner, graph, config, approvals
+
+    @parameterized.expand([("approve",), ("reject",)])
+    async def test_response_targets_selected_parallel_approval(self, action: str) -> None:
+        executed: list[str] = []
+        runner, graph, config, approvals = await self._create_parallel_approvals(("first", "second"), executed)
         runner._resume_payload = {"action": action, "proposal_id": approvals["second"].proposal_id}
         command = await runner._init_or_update_state()
         await graph.ainvoke(command, config)
@@ -883,3 +889,17 @@ class TestRunnerClientToolCallInterrupt(BaseTest):
         await graph.ainvoke(await runner._init_or_update_state(), config)
         self.assertFalse((await graph.aget_state(config)).next)
         self.assertEqual(executed, ["second"] if action == "approve" else [])
+
+    async def test_new_message_rejects_all_parallel_approvals(self) -> None:
+        executed: list[str] = []
+        runner, graph, config, approvals = await self._create_parallel_approvals(("first", "second", "third"), executed)
+        runner._latest_message = HumanMessage(content="Stop, do something else", id=str(uuid4()))
+        runner._resume_payload = {"action": "reject", "proposal_id": approvals["first"].proposal_id}
+        await graph.ainvoke(await runner._init_or_update_state(), config)
+        self.assertFalse((await graph.aget_state(config)).next)
+        self.assertEqual(executed, [])
+        await self.conversation.arefresh_from_db()
+        self.assertEqual(
+            {self.conversation.approval_decisions[a.proposal_id]["decision_status"] for a in approvals.values()},
+            {"rejected"},
+        )

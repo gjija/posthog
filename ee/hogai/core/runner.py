@@ -590,22 +590,34 @@ class BaseAgentRunner(ABC):
                     self._stream_processor.mark_id_as_streamed(message.id)
 
             resume_value = self._resume_payload
+            resolved_payloads = [self._resume_payload] if self._resume_payload else []
             if self._resume_payload and self._resume_payload.get("action") in ("approve", "reject"):
                 proposal_id = self._resume_payload.get("proposal_id")
+                approval_interrupts = [
+                    pending
+                    for task in snapshot.tasks
+                    if task.result is None
+                    for pending in task.interrupts
+                    if isinstance(pending.value, ApprovalRequest)
+                ]
                 approval_interrupt = next(
-                    (
-                        pending
-                        for task in snapshot.tasks
-                        if task.result is None
-                        for pending in task.interrupts
-                        if isinstance(pending.value, ApprovalRequest) and pending.value.proposal_id == proposal_id
-                    ),
-                    None,
+                    (pending for pending in approval_interrupts if pending.value.proposal_id == proposal_id), None
                 )
                 if approval_interrupt is None:
                     raise ValueError("Approval does not match a pending operation")
                 # A scalar resume targets the next interrupt, which may belong to a different approval card.
                 resume_value = {approval_interrupt.interrupt_id: self._resume_payload}
+                if self._resume_payload.get("action") == "reject" and self._latest_message:
+                    # A new message rejects the whole batch of parallel approvals. Otherwise the agent sees
+                    # the other cards as still pending and requests them again.
+                    resolved_payloads = [
+                        {**self._resume_payload, "proposal_id": pending.value.proposal_id}
+                        for pending in approval_interrupts
+                    ]
+                    resume_value = {
+                        pending.interrupt_id: payload
+                        for pending, payload in zip(approval_interrupts, resolved_payloads)
+                    }
 
             # If there are pending nodes (snapshot.next is non-empty), we need to resume.
             # This happens when:
@@ -618,7 +630,8 @@ class BaseAgentRunner(ABC):
                     # The interrupt() call will return this payload value
 
                     # Update approval_decisions status if this is an approval/rejection response
-                    await self._update_approval_decision_status(self._resume_payload)
+                    for payload in resolved_payloads:
+                        await self._update_approval_decision_status(payload)
 
                     # If there's a new message alongside the resume (user sent message while approval pending),
                     # include it in the state update so the agent sees it as a proper HumanMessage
