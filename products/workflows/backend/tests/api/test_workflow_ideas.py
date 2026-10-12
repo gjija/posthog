@@ -60,6 +60,13 @@ class TestWorkflowIdeasAPI(APIBaseTest):
         assert response.status_code == 200, response.json()
         assert [row["key"] for row in response.json()["results"]] == ["first", "revenue", "engagement"]
 
+    @parameterized.expand([("empty", ""), ("whitespace", "  \t")])
+    def test_a_blank_key_is_refused_before_anything_is_saved(self, _name: str, key: str):
+        with self.assertRaises(ValueError):
+            create_ideas(team_id=self.team.id, items=[_idea("valid"), _idea(key)], source="manual")
+
+        assert not WorkflowIdea.objects.for_team(self.team.id).exists()
+
     def test_a_dismissed_key_is_never_suggested_again(self):
         [row] = create_ideas(team_id=self.team.id, items=[_idea("winback")], source="manual")
         response = self.client.post(self._url(f"{row.id}/dismiss/"), {"reason": "We send this already"})

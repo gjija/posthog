@@ -58,6 +58,9 @@ def create_ideas(
     *, team_id: int, items: Iterable[NewWorkflowIdea], source: str, source_ref: str | None = None
 ) -> list[WorkflowIdeaRecord]:
     """Stores new ideas and skips any key the project was already given, so a dismissal sticks."""
+    items = list(items)
+    if any(not item.key.strip() for item in items):
+        raise ValueError("Every workflow idea needs a non-blank key.")
     created = []
     for item in items:
         row, was_created = WorkflowIdea.objects.for_team(team_id).get_or_create(
