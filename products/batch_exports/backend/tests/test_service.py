@@ -5,6 +5,7 @@ import pytest
 
 from temporalio.converter import JSONPlainPayloadConverter
 
+from products.batch_exports.backend.facade.enums import IncrementalMode
 from products.batch_exports.backend.models.batch_export import (
     BatchExport,
     BatchExportBackfill,
@@ -12,9 +13,15 @@ from products.batch_exports.backend.models.batch_export import (
     BatchExportRun,
 )
 from products.batch_exports.backend.service import (
+    AnyBatchExportModel,
     AWSCredentials,
     AzureBlobBatchExportInputs,
+    BatchExportEventsCustomModel,
+    BatchExportEventsModel,
+    BatchExportHogQLModel,
     BatchExportModel,
+    BatchExportPersonsModel,
+    BatchExportSessionsModel,
     BigQueryBatchExportInputs,
     DatabricksBatchExportInputs,
     PostgresBatchExportInputs,
@@ -24,7 +31,103 @@ from products.batch_exports.backend.service import (
     S3CompatibleBatchExportInputs,
     aget_or_create_batch_export_backfill,
     align_timestamp_to_interval,
+    make_new_model,
+    migrate_batch_export_model,
 )
+
+
+class TestBatchExportModelMigration:
+    @pytest.mark.parametrize(
+        "legacy,expected",
+        [
+            (None, BatchExportEventsModel()),
+            (BatchExportModel(name="events", schema=None), BatchExportEventsModel()),
+            (
+                BatchExportModel(name="events", schema=None, filters=[{"key": "amount", "value": [1.5, True]}]),
+                BatchExportEventsModel(filters=[{"key": "amount", "value": [1.5, True]}]),
+            ),
+            (
+                BatchExportModel(name="events", schema={"fields": [], "values": {"value": 1.5}}),
+                BatchExportEventsCustomModel(schema={"fields": [], "values": {"value": 1.5}}),
+            ),
+            (BatchExportModel(name="persons", schema=None), BatchExportPersonsModel()),
+            (BatchExportModel(name="sessions", schema=None), BatchExportSessionsModel()),
+            (
+                BatchExportModel(name="hogql", schema=None, hogql_query="SELECT event FROM events", user_id=42),
+                BatchExportHogQLModel(query="SELECT event FROM events", user_id=42, modifiers={}),
+            ),
+            (
+                BatchExportModel(
+                    name="hogql",
+                    schema=None,
+                    hogql_query="SELECT event FROM events",
+                    user_id=42,
+                    hogql_modifiers={"convertToProjectTimezone": False},
+                ),
+                BatchExportHogQLModel(
+                    query="SELECT event FROM events",
+                    user_id=42,
+                    modifiers={"convertToProjectTimezone": False},
+                ),
+            ),
+        ],
+    )
+    def test_migration_preserves_legacy_payload(
+        self, legacy: BatchExportModel | None, expected: AnyBatchExportModel
+    ) -> None:
+        converter = JSONPlainPayloadConverter()
+        if legacy is not None:
+            payload = converter.to_payload(legacy)
+            assert payload is not None
+            legacy = converter.from_payload(payload, BatchExportModel)
+        migrated = migrate_batch_export_model(legacy)
+        assert migrated == expected
+        assert migrate_batch_export_model(migrated) is migrated
+
+    @pytest.mark.parametrize(
+        "legacy,message",
+        [
+            (BatchExportModel(name="unknown", schema=None), "Invalid model name"),
+            (BatchExportModel(name="hogql", schema=None, hogql_query="SELECT 1"), "requires user_id"),
+            (BatchExportModel(name="hogql", schema=None, user_id=42), "requires a query"),
+        ],
+    )
+    def test_invalid_legacy_model_is_rejected(self, legacy: BatchExportModel, message: str) -> None:
+        with pytest.raises(ValueError, match=message):
+            migrate_batch_export_model(legacy)
+
+    @pytest.mark.parametrize("primary_key,version_key", [((), ("updated_at",)), (("id",), ())])
+    def test_hogql_merge_requires_both_keys(self, primary_key: tuple[str, ...], version_key: tuple[str, ...]) -> None:
+        with pytest.raises(ValueError, match="MERGE requires"):
+            make_new_model(
+                "hogql",
+                query="SELECT 1",
+                user_id=42,
+                modifiers={},
+                incremental_mode=IncrementalMode.MERGE,
+                primary_key=primary_key,
+                version_key=version_key,
+            )
+
+    def test_factory_selects_custom_events_and_preserves_hogql_merge_settings(self) -> None:
+        assert isinstance(make_new_model("events"), BatchExportEventsModel)
+        assert isinstance(make_new_model("events", schema={"fields": [], "values": {}}), BatchExportEventsCustomModel)
+        assert isinstance(make_new_model("persons"), BatchExportPersonsModel)
+        assert isinstance(make_new_model("sessions"), BatchExportSessionsModel)
+        model = make_new_model(
+            "hogql",
+            query="SELECT id, updated_at FROM events",
+            user_id=42,
+            modifiers={},
+            incremental_mode=IncrementalMode.MERGE,
+            primary_key=("id",),
+            version_key=("updated_at",),
+        )
+        assert model.incremental_mode == IncrementalMode.MERGE
+        assert model.primary_key == ("id",)
+        assert model.version_key == ("updated_at",)
+        assert migrate_batch_export_model(model) is model
+
 
 DESTINATION_INPUTS = {
     "Databricks": DatabricksBatchExportInputs(
