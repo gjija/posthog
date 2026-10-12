@@ -1,20 +1,14 @@
 """Turns a short idea spec into a complete draft workflow: trigger, waits, designed emails and a goal."""
 
 import html
-from datetime import datetime
 from typing import Any
 
-import structlog
-
-from posthog.hogql import ast
 from posthog.hogql.query import execute_hogql_query
 
 from posthog.clickhouse.query_tagging import Feature, Product, tags_context
 from posthog.models import Team
 
 from products.workflows.backend.facade.contracts import IdeaDraftSpec, IdeaEmail, NewWorkflowIdea
-
-logger = structlog.get_logger(__name__)
 
 UNSUBSCRIBE_FOOTER = (
     '<p style="text-align: center; font-size: 12px; color: #6b7280;">'
@@ -272,26 +266,3 @@ def find_site_url(team_id: int, app_urls: list[str] | None) -> str | None:
         )
     rows = response.results or []
     return f"https://{rows[0][0]}" if rows else None
-
-
-def people_reached_since(team_id: int, trigger_event: str, goal_events: list[str], since: datetime) -> int | None:
-    """People with an email address who hit the trigger after `since` and have not reached a goal: who a live
-    version of the draft would have emailed by now."""
-    try:
-        with tags_context(product=Product.WORKFLOWS, feature=Feature.QUERY):
-            response = execute_hogql_query(
-                "SELECT count(DISTINCT person_id) FROM events WHERE event = {trigger} AND timestamp > {since} "
-                "AND notEmpty(toString(person.properties.email)) AND person_id NOT IN ("
-                "SELECT person_id FROM events WHERE event IN {goals} AND timestamp > {since})",
-                placeholders={
-                    "trigger": ast.Constant(value=trigger_event),
-                    "goals": ast.Tuple(exprs=[ast.Constant(value=goal) for goal in goal_events]),
-                    "since": ast.Constant(value=since),
-                },
-                team=Team.objects.get(id=team_id),
-            )
-    except Exception as error:
-        logger.warning("workflow_idea_reach_query_failed", team_id=team_id, error=str(error))
-        return None
-    rows = response.results or []
-    return int(rows[0][0]) if rows else 0
