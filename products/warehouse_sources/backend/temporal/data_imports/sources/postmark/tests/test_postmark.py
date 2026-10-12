@@ -134,6 +134,7 @@ class TestEndpointDataKeys:
         [
             ("messages_outbound", "Messages", "MessageID"),
             ("messages_inbound", "InboundMessages", "MessageID"),
+            ("opens", "Opens", "MessageID"),
             ("bounces", "Bounces", "ID"),
             ("templates", "Templates", "TemplateId"),
             ("message_streams", "MessageStreams", "ID"),
@@ -157,7 +158,7 @@ class TestSourceResponseShape:
 
         config = POSTMARK_ENDPOINTS[endpoint]
         assert response.name == endpoint
-        assert response.primary_keys == [config.primary_key]
+        assert response.primary_keys == config.primary_keys
 
         if config.partition_key:
             assert response.partition_mode == "datetime"
