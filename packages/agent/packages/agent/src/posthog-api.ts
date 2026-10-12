@@ -108,9 +108,7 @@ export class PostHogAPIClient {
     run_id: string;
     message_id: string;
     prompt: string;
-    prompt_char_count: number;
     history: string;
-    history_source: string;
     runtime_version: string;
   }): Promise<ContextSelectionResponse> {
     const response = await this.apiRequest<unknown>(

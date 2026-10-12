@@ -135,7 +135,6 @@ describe("cloud context selection", () => {
     expect(api.prepareContextSelection.mock.calls[0][0]).toMatchObject({
       prompt: "What changed?",
       history: "Earlier conversation summary",
-      history_source: "resume_prompt",
     });
     await selector.dispatch("r", "next", [{ type: "text", text: "Yes" }], send);
     expect(api.prepareContextSelection.mock.calls[1][0].history).toContain(

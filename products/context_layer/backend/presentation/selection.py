@@ -25,11 +25,6 @@ class SelectionUnavailable(APIException):
     default_detail = "Context selection is busy or exceeded its request deadline."
 
 
-class SelectionHistorySource(models.TextChoices):
-    RUNTIME = "runtime"
-    RESUME_PROMPT = "resume_prompt"
-
-
 class SelectionMode(models.TextChoices):
     DISABLED = "disabled"
     CONTROL = "control"
@@ -40,12 +35,6 @@ class SelectionMode(models.TextChoices):
 class PrepareSerializer(serializers.Serializer):
     runtime_version = serializers.CharField(
         max_length=128, required=False, help_text="Cloud agent build version, or unknown."
-    )
-    prompt_char_count = serializers.IntegerField(
-        min_value=0, required=False, help_text="Original request length before truncation."
-    )
-    history_source = serializers.ChoiceField(
-        choices=SelectionHistorySource.choices, required=False, help_text="Origin of the bounded conversation context."
     )
     run_id = serializers.UUIDField(help_text="Cloud run receiving this human message.")
     message_id = serializers.CharField(max_length=128, help_text="Stable user-message identifier, reused on retries.")

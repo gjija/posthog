@@ -27,7 +27,6 @@ export class ContextSelection {
   enabled = false;
   private history = "";
   private historyRunId: string | undefined;
-  private historySource: "runtime" | "resume_prompt" = "resume_prompt";
 
   constructor(
     private readonly api: PostHogAPIClient,
@@ -40,7 +39,6 @@ export class ContextSelection {
   resetHistory(runId: string, history = ""): void {
     this.historyRunId = runId;
     this.history = tail(history, 12_000);
-    this.historySource = "resume_prompt";
   }
 
   async dispatch(
@@ -85,9 +83,7 @@ export class ContextSelection {
         run_id: runId,
         message_id: messageId,
         prompt: tail(userText, 20_000),
-        prompt_char_count: Array.from(userText).length,
         history,
-        history_source: this.historySource,
         runtime_version: this.runtimeVersion,
       });
     } catch {
@@ -105,7 +101,6 @@ export class ContextSelection {
   private recordUser(runId: string, text: string): void {
     if (!this.enabled || this.historyRunId !== runId) return;
     this.history = tail(`${this.history}\nUser: ${text}`, 12_000);
-    this.historySource = "runtime";
   }
 
   recordAssistant(runId: string, text: string): void {
