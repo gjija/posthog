@@ -37,6 +37,13 @@ pub struct PartitionOffset {
     pub lag_ms: i64,
 }
 
+#[derive(Clone, Serialize)]
+pub struct CommitOffset {
+    pub topic: String,
+    pub partition: i32,
+    pub offset: i64,
+}
+
 /// The distinct event kinds recorded across the consumer's lifecycle. Serialized
 /// with an internal `type` tag so the UI can switch on it.
 #[derive(Clone, Serialize)]
@@ -81,13 +88,15 @@ pub enum DebugEventKind {
         batch_id: String,
         sub_batches: Vec<SubBatchInfo>,
     },
-    /// A batch's offsets were committed to Kafka.
-    BatchCommitted {
+    /// Every group of a poll completed.
+    PollCompleted {
         batch_id: String,
         accepted: u32,
         duration_ms: u64,
         partitions: Vec<PartitionOffset>,
     },
+    /// An async offset commit was handed to the Kafka client.
+    CommitSubmitted { offsets: Vec<CommitOffset> },
     /// Batch processing failed; the process will exit and restart.
     BatchFailed {
         batch_id: Option<String>,
