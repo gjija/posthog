@@ -745,6 +745,8 @@ ignore_imports = [
     "products.cdp.backend.presentation.hog_functions -> products.cdp.backend.filters",
     "products.cdp.backend.presentation.hog_functions -> products.cdp.backend.validation",
     "products.cdp.backend.presentation.serializers -> products.cdp.backend.validation",
+    "products.cdp.backend.presentation.hog_functions -> products.cdp.backend.flag_gated_templates",
+    "products.cdp.backend.presentation.icons -> products.cdp.backend.services.icons",
 ]
 
 # routes.py is the one module core reads to assemble a product's API router, so it is the
