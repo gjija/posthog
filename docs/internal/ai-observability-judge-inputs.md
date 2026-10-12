@@ -164,6 +164,7 @@ Lower the setting if backfills crowd out live evaluations.
 Backfill activities retry temporary database, DNS, connection, and rate-limit failures up to 5 times within 10 minutes, or within the live time limit when that is longer, with backoff from 10 seconds to one minute.
 A backfill run never treats its last attempt as permanent, so a DNS failure fails the run instead of disabling the evaluation.
 After 10 failed runs in a row, the backfill pauses for 1, 2, 5, 10, then 30 minutes, and a success resets that sequence.
+The failure count and the pauses carry over between pages.
 When the pauses run out, or a run reports an error that disables the evaluation, the backfill stops as **Interrupted** and keeps its cursor.
 Its stop reason says whether the evaluation was disabled or the runs kept failing.
 Live evaluation retry budgets remain unchanged.
@@ -173,6 +174,8 @@ Result emission has a separate retry budget, so retrying emission does not repea
 An interrupted backfill preserves completed results.
 **Retry remaining** creates a new backfill with the original date range and filters, using the current evaluation settings.
 It preserves usable existing results and retries units without usable results, including recorded DNS failures.
+It is not available for a backfill that re-ran existing results.
+A cancelled backfill still counts the runs it started before the cancel, because they finish and are billed.
 Persistent failures can still interrupt a backfill after its recovery budget; recovery does not guarantee a verdict for invalid or permanently rejected inputs.
 
 ## Result encoding

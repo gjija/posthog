@@ -384,11 +384,13 @@ export function EvaluationBackfillsTab({
                             loading={transitioningIds.includes(backfill.id)}
                             data-attr="llma-eval-backfill-retry-remaining"
                             disabledReason={
-                                !evaluation?.enabled
-                                    ? 'Re-enable the evaluation before retrying.'
-                                    : hasActiveBackfill || creatingBackfill || transitioningIds.length > 0
-                                      ? 'Wait for the active backfill operation to finish.'
-                                      : undefined
+                                backfill.rerun_existing
+                                    ? "Retry isn't available for a backfill that re-ran existing results. Start a new backfill instead."
+                                    : !evaluation?.enabled
+                                      ? 'Re-enable the evaluation before retrying.'
+                                      : hasActiveBackfill || creatingBackfill || transitioningIds.length > 0
+                                        ? 'Wait for the active backfill operation to finish.'
+                                        : undefined
                             }
                             onClick={() =>
                                 LemonDialog.open({

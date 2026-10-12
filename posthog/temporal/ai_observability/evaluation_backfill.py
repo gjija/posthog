@@ -112,6 +112,9 @@ class EvaluationBackfillInputs:
     team_id: int
     # Reset by any tick that succeeds.
     consecutive_failures: int = 0
+    # Carried across pages, so a backfill smaller than one pause cycle can still stop.
+    failed_runs_in_a_row: int = 0
+    pauses_in_a_row: int = 0
 
 
 class TickAction(StrEnum):
@@ -179,6 +182,8 @@ class AdvanceCursorInputs:
     completed_delta: int | None = None
     evaluation_skipped_delta: int = 0
     stop_reason: str | None = None
+    # Records a page a user cancelled midway, whose started runs still finish and bill.
+    cancelled: bool = False
 
 
 @frozen
@@ -234,9 +239,9 @@ def _stop_reason(result: WorkflowResult) -> str | None:
 class _BackfillPacing:
     """Decides, as runs finish, whether a backfill keeps starting runs, pauses, or stops."""
 
-    def __init__(self) -> None:
-        self.failures = 0
-        self.pauses = 0
+    def __init__(self, failures: int = 0, pauses: int = 0) -> None:
+        self.failures = failures
+        self.pauses = pauses
         self.stop_reason: str | None = None
         self._pausing = asyncio.Lock()
 
@@ -263,7 +268,7 @@ class _BackfillPacing:
             self.stop_reason = self.stop_reason or result.stop_reason
         elif result.outcome == ChildOutcome.FAILED:
             self.failures += 1
-        else:
+        elif result.outcome == ChildOutcome.EVALUATED:
             self.failures = 0
             self.pauses = 0
 
@@ -523,7 +528,7 @@ def _advance_backfill_cursor(inputs: AdvanceCursorInputs) -> AdvanceCursorOutput
     # result was lost after it committed, and a second blind increment would inflate progress.
     # Filtering on RUNNING lets a concurrent cancel win over the advance.
     updated = row.filter(
-        status=EvaluationBackfillStatus.RUNNING,
+        status=EvaluationBackfillStatus.CANCELLED if inputs.cancelled else EvaluationBackfillStatus.RUNNING,
         cursor_timestamp=expected_timestamp,
         cursor_unit_id=inputs.expected_cursor_unit_id,
     ).update(**updates)
@@ -541,7 +546,7 @@ def _advance_backfill_cursor(inputs: AdvanceCursorInputs) -> AdvanceCursorOutput
         if inputs.stop_reason:
             status = "failed" if inputs.stop_reason == "execution_failed" else "stopped"
             report_backfill_finished(inputs.team_id, inputs.backfill_id, status=status, stop_reason=inputs.stop_reason)
-        return AdvanceCursorOutput(finished=inputs.exhausted or inputs.stop_reason is not None)
+        return AdvanceCursorOutput(finished=inputs.exhausted or inputs.stop_reason is not None or inputs.cancelled)
     # Zero rows has two causes that end differently. If the row is no longer RUNNING, someone
     # cancelled or completed it and the loop stops. If it is still RUNNING, an earlier attempt of
     # this same advance already committed and only its result was lost, so the loop must carry on
@@ -662,49 +667,75 @@ class EvaluationBackfillWorkflow(PostHogWorkflow):
         found = await self._find_candidates(inputs, tick)
         # A tick prepared by a worker that predates max_in_flight carries 0.
         slots = asyncio.Semaphore(tick.max_in_flight or BACKFILL_DEFAULT_MAX_IN_FLIGHT)
-        pacing = _BackfillPacing()
+        pacing = _BackfillPacing(inputs.failed_runs_in_a_row, inputs.pauses_in_a_row)
+        started: list[str] = []
 
         async def run_in_slot(candidate: CandidatePayload) -> BackfillChildOutcome:
             async with slots:
                 if not await pacing.ready():
                     return BackfillChildOutcome(outcome=ChildOutcome.NOT_STARTED)
-                result = await self._run_child(inputs, tick, candidate)
+                result = await self._run_child(inputs, tick, candidate, started)
                 pacing.record(result)
                 return result
 
-        # boffin: advance only after every child in this batch has a known outcome.
-        results = await asyncio.gather(*(run_in_slot(candidate) for candidate in found.candidates))
-        outcomes = Counter(result.outcome for result in results)
-        advance = await temporalio.workflow.execute_activity(
-            advance_evaluation_backfill_cursor_activity,
-            AdvanceCursorInputs(
-                backfill_id=inputs.backfill_id,
-                team_id=inputs.team_id,
-                expected_cursor_timestamp=found.started_from_cursor_timestamp,
-                expected_cursor_unit_id=found.started_from_cursor_unit_id,
-                # A stopped page keeps its cursor, because it never reached some of its units.
-                new_cursor_timestamp=None if pacing.stopped else found.next_cursor_timestamp,
-                new_cursor_unit_id="" if pacing.stopped else found.next_cursor_unit_id,
-                dispatched_delta=sum(result.started for result in results),
-                skipped_delta=outcomes[ChildOutcome.EXISTING],
-                completed_delta=outcomes[ChildOutcome.EVALUATED],
-                evaluation_skipped_delta=outcomes[ChildOutcome.SKIPPED],
-                failed_delta=outcomes[ChildOutcome.FAILED],
-                exhausted=found.exhausted and not pacing.stopped,
-                stop_reason=pacing.stop_reason,
-            ),
-            start_to_close_timeout=ACTIVITY_TIMEOUT,
-            schedule_to_close_timeout=ACTIVITY_SCHEDULE_TO_CLOSE,
-            retry_policy=ACTIVITY_RETRY_POLICY,
-        )
+        async def record(results: list[BackfillChildOutcome], *, cancelled: bool = False) -> AdvanceCursorOutput:
+            outcomes = Counter(result.outcome for result in results)
+            # A stopped page keeps its cursor, because it never reached some of its units.
+            keep_cursor = pacing.stopped and not cancelled
+            return await temporalio.workflow.execute_activity(
+                advance_evaluation_backfill_cursor_activity,
+                AdvanceCursorInputs(
+                    backfill_id=inputs.backfill_id,
+                    team_id=inputs.team_id,
+                    expected_cursor_timestamp=found.started_from_cursor_timestamp,
+                    expected_cursor_unit_id=found.started_from_cursor_unit_id,
+                    new_cursor_timestamp=None if keep_cursor else found.next_cursor_timestamp,
+                    new_cursor_unit_id="" if keep_cursor else found.next_cursor_unit_id,
+                    dispatched_delta=len(started),
+                    skipped_delta=outcomes[ChildOutcome.EXISTING],
+                    completed_delta=outcomes[ChildOutcome.EVALUATED],
+                    evaluation_skipped_delta=outcomes[ChildOutcome.SKIPPED],
+                    failed_delta=outcomes[ChildOutcome.FAILED],
+                    exhausted=found.exhausted and not pacing.stopped and not cancelled,
+                    stop_reason=None if cancelled else pacing.stop_reason,
+                    cancelled=cancelled,
+                ),
+                start_to_close_timeout=ACTIVITY_TIMEOUT,
+                schedule_to_close_timeout=ACTIVITY_SCHEDULE_TO_CLOSE,
+                retry_policy=ACTIVITY_RETRY_POLICY,
+            )
+
+        tasks = [asyncio.create_task(run_in_slot(candidate)) for candidate in found.candidates]
+        try:
+            # boffin: advance only after every child in this batch has a known outcome.
+            results = await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            # The children already started keep running and bill, so the cancelled row still counts them.
+            await record(
+                [task.result() for task in tasks if task.done() and not task.cancelled() and not task.exception()],
+                cancelled=True,
+            )
+            raise
+        advance = await record(results)
         if advance.finished:
             await self._measure_remainder(inputs)
             return
         await temporalio.workflow.sleep(BACKFILL_TICK_INTERVAL)
-        temporalio.workflow.continue_as_new(replace(inputs, consecutive_failures=0))
+        temporalio.workflow.continue_as_new(
+            replace(
+                inputs,
+                consecutive_failures=0,
+                failed_runs_in_a_row=pacing.failures,
+                pauses_in_a_row=pacing.pauses,
+            )
+        )
 
     async def _run_child(
-        self, inputs: EvaluationBackfillInputs, tick: PrepareTickOutput, candidate: CandidatePayload
+        self,
+        inputs: EvaluationBackfillInputs,
+        tick: PrepareTickOutput,
+        candidate: CandidatePayload,
+        started_units: list[str],
     ) -> BackfillChildOutcome:
         child = child_workflow_name_and_id(
             evaluation_id=tick.evaluation_id,
@@ -730,6 +761,7 @@ class EvaluationBackfillWorkflow(PostHogWorkflow):
                     return BackfillChildOutcome(outcome=ChildOutcome.EXISTING)
                 handle = await self._start_child_handle(inputs, tick, candidate, retry_completed=True)
             started = True
+            started_units.append(candidate.unit_id)
             result = await asyncio.shield(handle)
             outcome = _child_outcome(result)
             return BackfillChildOutcome(
