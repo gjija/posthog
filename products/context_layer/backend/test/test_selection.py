@@ -302,7 +302,11 @@ class TestSelectionSources(SimpleTestCase):
             )
         self.assertIn("Activation definition", result.context)
 
-    def test_failed_rerank_preserves_other_completed_scores(self) -> None:
+    @parameterized.expand([("failed",), ("unfinished",)])
+    @override_settings(CONTEXT_SELECTION_TIMEOUT_SECONDS=1)
+    def test_slow_or_failed_rerank_preserves_other_completed_scores(self, outcome: str) -> None:
+        release = Event()
+
         def response(request: httpx.Request) -> httpx.Response:
             if "llm_skills" in request.url.path:
                 return httpx.Response(200, json={"results": [self.skill, {**self.skill, "name": "slow-guide"}]})
@@ -311,10 +315,15 @@ class TestSelectionSources(SimpleTestCase):
         def decide(*, state: dict[str, JsonValue], questions: dict[str, Question]) -> SystemOneResult:
             record = state.get("candidate")
             if isinstance(record, dict) and record.get("id") == "slow-guide":
-                raise httpx.ReadTimeout("Timed out")
+                if outcome == "failed":
+                    raise httpx.ReadTimeout("Timed out")
+                release.wait(timeout=2)
             return SystemOneResult(model="test", answers={"useful": NoulAnswer(probability=0.95)}, input_tokens=1)
 
-        result = self.select(response, decide=decide)
+        try:
+            result = self.select(response, decide=decide)
+        finally:
+            release.set()
         self.assertIn("activation-guide", result.context)
         self.assertNotIn("slow-guide", result.context)
         self.assertEqual(self.span["$ai_output_state"]["unscored_count"], 1)

@@ -7,10 +7,6 @@ the store, pages, and enablement internals only through here.
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    pass
 
 from django.urls import reverse
 

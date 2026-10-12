@@ -70,6 +70,7 @@ class CatalogSearchFilter(SearchFilter):
         condition = Q()
         for term in terms[:60]:
             for field in self.get_search_fields(view, request) or []:
+                # nosemgrep: orm-field-injection - fields come from static view configuration; only values come from the request.
                 condition |= Q(**{f"{field}__icontains": term})
         return queryset.filter(condition).distinct()
 

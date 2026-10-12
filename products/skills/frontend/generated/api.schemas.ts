@@ -919,6 +919,11 @@ export interface LLMSkillSearchMatchApi {
 }
 
 export interface LLMSkillSearchResultApi {
+    /**
+     * Published version matched by this search result.
+     * @minimum 1
+     */
+    version: number
     /** Unique skill name. */
     name: string
     /** What this skill does and when to use it. */
