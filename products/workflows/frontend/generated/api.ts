@@ -13,6 +13,8 @@ import type {
     AppMetricsTotalsResponseApi,
     BlastRadiusApi,
     BlastRadiusRequestApi,
+    EmailDraftApi,
+    EmailDraftRequestApi,
     EmailSendingSuspensionStatusApi,
     HogFlowApi,
     HogFlowBatchJobApi,
@@ -60,8 +62,6 @@ import type {
     PatchedHogFlowScheduleApi,
     PatchedHogFlowTemplateApi,
     PatchedHogFlowUpdateApi,
-    PreviousRecipientsApi,
-    PreviousRecipientsRequestApi,
     TeamEmailReputationResponseApi,
     WorkflowEmailPauseStatusApi,
     WorkflowProposalApi,
@@ -821,7 +821,7 @@ export const getHogFlowsOptimizationCreateUrl = (projectId: string, id: string) 
 export const hogFlowsOptimizationCreate = async (
     projectId: string,
     id: string,
-    hogFlowOptimizationApi: HogFlowOptimizationApi,
+    hogFlowOptimizationApi: NonReadonly<HogFlowOptimizationApi>,
     options?: RequestInit
 ): Promise<HogFlowOptimizationApi> => {
     return apiMutator<HogFlowOptimizationApi>(getHogFlowsOptimizationCreateUrl(projectId, id), {
@@ -1315,24 +1315,24 @@ export const hogFlowsUserBlastRadiusCreate = async (
     })
 }
 
-export const getWorkflowPreviousRecipientsCreateUrl = (projectId: string) => {
-    return `/api/projects/${projectId}/workflow_previous_recipients/`
+export const getWorkflowEmailDraftsCreateUrl = (projectId: string) => {
+    return `/api/projects/${projectId}/workflow_email_drafts/`
 }
 
 /**
- * Find everyone that earlier workflows started from the same record already emailed, and save them as a static cohort, so a new broadcast about that record can leave them out. Reads the sent-email log, which keeps 30 days. Returns a null cohort when nobody was emailed yet.
- * @summary Save the people already emailed about a record as a cohort
+ * Write a first draft of an email to the people an entity points at. A model writes it when the project has AI drafts on and the organization approved AI data processing; otherwise, or when the model fails, the fixed template for the source is returned. Nothing is saved.
+ * @summary Draft an email about an error, feature, survey, flag or cohort
  */
-export const workflowPreviousRecipientsCreate = async (
+export const workflowEmailDraftsCreate = async (
     projectId: string,
-    previousRecipientsRequestApi: PreviousRecipientsRequestApi,
+    emailDraftRequestApi: EmailDraftRequestApi,
     options?: RequestInit
-): Promise<PreviousRecipientsApi> => {
-    return apiMutator<PreviousRecipientsApi>(getWorkflowPreviousRecipientsCreateUrl(projectId), {
+): Promise<EmailDraftApi> => {
+    return apiMutator<EmailDraftApi>(getWorkflowEmailDraftsCreateUrl(projectId), {
         ...options,
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...options?.headers },
-        body: JSON.stringify(previousRecipientsRequestApi),
+        body: JSON.stringify(emailDraftRequestApi),
     })
 }
 
