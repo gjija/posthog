@@ -2,12 +2,11 @@ import re
 import json
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextvars import copy_context
-from dataclasses import asdict
-from functools import partial
+from dataclasses import asdict, replace
 from threading import BoundedSemaphore
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 from urllib.parse import quote
 from uuid import UUID, uuid4
 
@@ -18,7 +17,7 @@ import httpx
 import structlog
 
 from posthog.dataclasses import frozen
-from posthog.llm.system_one import JsonValue, NoulAnswer, NoulQuestion
+from posthog.llm.system_one import NoulAnswer, NoulQuestion
 from posthog.llm.system_one_client import build_system_one_client
 from posthog.models.scoping import team_scope
 from posthog.models.user import User
@@ -27,12 +26,15 @@ from posthog.ph_client import get_feature_flag_or_none, ph_background_capture
 from products.tasks.backend.facade.api import is_current_task_run_actor
 from products.tasks.backend.models import Task, TaskRun
 
+if TYPE_CHECKING:
+    from posthog.llm.system_one_client import SystemOneClient
+
 logger = structlog.get_logger(__name__)
 MAX_PROMPT_CHARS = 20_000
 MAX_HISTORY_CHARS = 12_000
 MAX_CONTEXT_CHARS = 8_000
 MAX_SOURCE_TEXT = 2_800
-CONFIG_VERSION = "context-selection-v8"
+CONFIG_VERSION = "context-selection-v9"
 type SourceKind = Literal["skill", "metric", "certification", "relationship", "business_knowledge"]
 SOURCE_ENDPOINTS: dict[SourceKind, tuple[str, int]] = {
     "skill": ("llm_skills/search/", 10),
@@ -54,11 +56,12 @@ RELEVANCE = NoulQuestion(
     criteria_true="Useful context with matching subject and scope.",
     criteria_false="Unrelated, mere word overlap, or wrong subject or scope.",
 )
-_REQUESTS = ThreadPoolExecutor(max_workers=4, thread_name_prefix="context-request")
-_REQUEST_CAPACITY = BoundedSemaphore(4)
+_MAX_REQUESTS = 4
+_REQUESTS = ThreadPoolExecutor(max_workers=_MAX_REQUESTS, thread_name_prefix="context-request")
+_REQUEST_CAPACITY = BoundedSemaphore(_MAX_REQUESTS)
 # Busy processes skip optional context rather than accumulate unbounded work.
-_WORKERS = ThreadPoolExecutor(max_workers=8, thread_name_prefix="context-selection")
-_WORK_CAPACITY = BoundedSemaphore(64)
+_SOURCE_WORKERS = ThreadPoolExecutor(max_workers=8, thread_name_prefix="context-source")
+_SOURCE_CAPACITY = BoundedSemaphore(_MAX_REQUESTS * len(SOURCE_ENDPOINTS))
 
 
 @frozen
@@ -85,12 +88,6 @@ class PreparedContext:
     context: str = ""
     mode: str = "disabled"
     reason: str = "disabled"
-
-
-@frozen
-class Batch[T]:
-    values: dict[str, T]
-    errors: dict[str, str]
 
 
 class SelectionDenied(PermissionError):
@@ -129,33 +126,6 @@ def bounded_request[T](team_id: int, operation: Callable[[], T]) -> T:
     except TimeoutError as error:
         future.cancel()
         raise SelectionUnavailable() from error
-
-
-def collect[T](operations: dict[str, Callable[[], T]], deadline: float) -> Batch[T]:
-    pending = {}
-    values: dict[str, T] = {}
-    errors: dict[str, str] = {}
-    for key, operation in operations.items():
-        if not _WORK_CAPACITY.acquire(blocking=False):
-            errors[key] = "CapacityError"
-            continue
-        try:
-            future = _WORKERS.submit(operation)
-        except Exception:
-            _WORK_CAPACITY.release()
-            raise
-        future.add_done_callback(lambda _: _WORK_CAPACITY.release())
-        pending[future] = key
-    done, unfinished = wait(pending, timeout=max(0, deadline - time.monotonic()))
-    for future in done:
-        try:
-            values[pending[future]] = future.result()
-        except Exception as error:
-            errors[pending[future]] = type(error).__name__
-    for future in unfinished:
-        future.cancel()
-        errors[pending[future]] = "TimeoutError"
-    return Batch(values=values, errors=errors)
 
 
 def selection_mode(run: TaskRun) -> str:
@@ -246,14 +216,39 @@ class ContextSelector:
             document_id=document_id,
         )
 
-    def score(self, deadline: float, candidate: Candidate | None = None) -> float:
+    def retrieve(self, deadline: float) -> list[Candidate]:
+        pending: dict[Future[list[Candidate]], SourceKind] = {}
+        candidates: list[Candidate] = []
+        errors: dict[str, str] = {}
+        for kind in SOURCE_ENDPOINTS:
+            if not _SOURCE_CAPACITY.acquire(blocking=False):
+                errors[kind] = "CapacityError"
+                continue
+            try:
+                future = _SOURCE_WORKERS.submit(self.search, kind, deadline)
+            except Exception:
+                _SOURCE_CAPACITY.release()
+                raise
+            future.add_done_callback(lambda _: _SOURCE_CAPACITY.release())
+            pending[future] = kind
+        done, unfinished = wait(pending, timeout=max(0, deadline - time.monotonic()))
+        for future in done:
+            try:
+                candidates.extend(future.result())
+            except Exception as error:
+                errors[pending[future]] = type(error).__name__
+        for future in unfinished:
+            future.cancel()
+            errors[pending[future]] = "TimeoutError"
+        self.observation["source_errors"] = errors
+        return candidates
+
+    def decision_client(self, deadline: float, step: Literal["gate", "rerank"]) -> "SystemOneClient":
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("selector_deadline")
-        state: dict[str, JsonValue] = {"user_request": self.selection.prompt, "history": self.selection.history}
-        if candidate is not None:
-            state["candidate"] = asdict(candidate)
-        client = build_system_one_client(
+        self.observation["selection_step"] = step
+        return build_system_one_client(
             model=settings.HOGQL_PROMPT_JEV_MODEL,
             ai_product="posthog_ai",
             distinct_id=str(self.actor.distinct_id),
@@ -263,47 +258,62 @@ class ContextSelector:
                 **self.properties,
                 "ai_stage": "context_selection",
                 "selection_id": self.selection_id,
-                "candidate_id": candidate.id if candidate else "",
-                "selection_step": "rerank" if candidate else "gate",
+                "selection_step": step,
             },
         )
-        answer = client.decide(state=state, questions={"useful": GATE if candidate is None else RELEVANCE}).answers[
-            "useful"
-        ]
+
+    def gate(self, deadline: float) -> float:
+        client = self.decision_client(deadline, "gate")
+        answer = client.decide(
+            state={"user_request": self.selection.prompt, "history": self.selection.history}, questions={"useful": GATE}
+        ).answers["useful"]
         if not isinstance(answer, NoulAnswer):
             raise ValueError("invalid_selector_answer")
         return answer.probability
 
+    def rerank(self, candidates: list[Candidate], deadline: float) -> list[tuple[Candidate, float]]:
+        if not candidates:
+            return []
+        keyed = {f"candidate_{i}": candidate for i, candidate in enumerate(candidates)}
+        client = self.decision_client(deadline, "rerank")
+        answers = client.decide(
+            state={
+                "user_request": self.selection.prompt,
+                "history": self.selection.history,
+                "candidates": {key: asdict(candidate) for key, candidate in keyed.items()},
+            },
+            questions={
+                key: replace(
+                    RELEVANCE,
+                    instructions=f"{RELEVANCE.instructions} Evaluate only state.candidates.{key}. "
+                    "Score this candidate independently; other candidates are not supporting evidence.",
+                )
+                for key in keyed
+            },
+        ).answers
+        scored: list[tuple[Candidate, float]] = []
+        for key, candidate in keyed.items():
+            answer = answers[key]
+            if not isinstance(answer, NoulAnswer):
+                raise ValueError("invalid_selector_answer")
+            scored.append((candidate, answer.probability))
+        return scored
+
     def select(self, deadline: float) -> str:
-        gate = self.score(deadline)
+        gate = self.gate(deadline)
         self.observation["gate_probability"] = gate
         if gate <= 0.3:
             self.observation["reason"] = "gate_skipped"
             return ""
         started = time.monotonic()
         retrieval_deadline = started + max(0, deadline - started) / 2
-        sources = collect(
-            {kind: partial(self.search, kind, retrieval_deadline) for kind in SOURCE_ENDPOINTS}, retrieval_deadline
-        )
-        candidates = [candidate for records in sources.values.values() for candidate in records]
-        self.observation.update(
-            source_errors=sources.errors, retrieval_seconds=time.monotonic() - started, candidate_count=len(candidates)
-        )
-        # Leave time to pack completed scores even when another candidate times out.
-        scoring_deadline = deadline - min(0.25, max(0, deadline - time.monotonic()) / 4)
-        scores = collect(
-            {str(i): partial(self.score, scoring_deadline, candidate) for i, candidate in enumerate(candidates)},
-            scoring_deadline,
-        )
-        self.observation["scorer_errors"] = [
-            {"candidate_id": candidates[int(i)].id, "error_type": error} for i, error in scores.errors.items()
-        ]
+        candidates = self.retrieve(retrieval_deadline)
+        self.observation.update(retrieval_seconds=time.monotonic() - started, candidate_count=len(candidates))
+        scored = self.rerank(candidates, deadline)
         self.observation["scores"] = [
-            {"id": candidates[int(i)].id, "kind": candidates[int(i)].kind, "score": score}
-            for i, score in scores.values.items()
+            {"id": candidate.id, "kind": candidate.kind, "score": score} for candidate, score in scored
         ]
-        self.observation["unscored_count"] = len(candidates) - len(scores.values)
-        return self.render([(candidates[int(i)], score) for i, score in scores.values.items()])
+        return self.render(scored)
 
     def render(self, scored: list[tuple[Candidate, float]]) -> str:
         header = (

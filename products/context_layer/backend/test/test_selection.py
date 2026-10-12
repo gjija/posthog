@@ -15,7 +15,7 @@ from rest_framework.parsers import JSONParser
 from rest_framework.request import Request
 from rest_framework.test import APIRequestFactory
 
-from posthog.llm.system_one import JsonValue, NoulAnswer, Question, SystemOneResult
+from posthog.llm.system_one import JsonValue, Question, SystemOneResult, parse_system_one_response
 from posthog.models.organization import Organization
 from posthog.models.team.team import Team
 from posthog.models.user import User
@@ -65,9 +65,7 @@ class TestSelection(SimpleTestCase):
         self.model = self.enterContext(
             patch("products.context_layer.backend.selection.build_system_one_client")
         ).return_value
-        self.model.decide.return_value = SystemOneResult(
-            model="test", answers={"useful": NoulAnswer(probability=0.95)}, input_tokens=1
-        )
+        self.model.decide.side_effect = self.decide
         self.skill = {"name": "activation-guide", "version": 3, "description": "Activation definition"}
         self.rows = {"llm_skills/search/": [self.skill]}
         self.status = 200
@@ -78,6 +76,11 @@ class TestSelection(SimpleTestCase):
                 "products.context_layer.backend.selection.httpx.Client",
                 side_effect=lambda **kwargs: client(transport=httpx.MockTransport(self.respond), **kwargs),
             )
+        )
+
+    def decide(self, *, state: dict[str, JsonValue], questions: dict[str, Question]) -> SystemOneResult:
+        return parse_system_one_response(
+            {"model": "test", "answers": {key: {"noul": 0.95} for key in questions}}, questions
         )
 
     def respond(self, request: httpx.Request) -> httpx.Response:
@@ -199,29 +202,32 @@ class TestSelection(SimpleTestCase):
         result = self.selector.prepare()
         self.assertEqual(bool(result.context), dependency == "capture")
 
-    @parameterized.expand([("failed",), ("unfinished",)])
-    @override_settings(CONTEXT_SELECTION_TIMEOUT_SECONDS=1)
-    def test_slow_or_failed_rerank_preserves_completed_scores(self, outcome: str) -> None:
-        release = Event()
+    @parameterized.expand([("timeout", "error"), ("incomplete", "error"), ("refusal", "error"), ("empty", "empty")])
+    def test_failed_or_empty_rerank_preserves_delivery(self, outcome: str, reason: str) -> None:
         self.rows["llm_skills/search/"] = [self.skill, {**self.skill, "name": "slow-guide"}]
-        answer = self.model.decide.return_value
+        if outcome == "empty":
+            self.rows = {}
 
         def decide(*, state: dict[str, JsonValue], questions: dict[str, Question]) -> SystemOneResult:
-            record = state.get("candidate")
-            if isinstance(record, dict) and record.get("id") == "slow-guide":
-                if outcome == "failed":
-                    raise httpx.ReadTimeout("Timed out")
-                release.wait(timeout=2)
-            return answer
+            if "candidates" not in state:
+                return self.decide(state=state, questions=questions)
+            if outcome == "timeout":
+                raise httpx.ReadTimeout("Timed out")
+            answers: dict[str, JsonValue] = {key: {"noul": 0.95} for key in questions}
+            key = next(iter(answers))
+            if outcome == "incomplete":
+                del answers[key]
+            else:
+                answers[key] = {"type": "refusal"}
+            return parse_system_one_response({"model": "test", "answers": answers}, questions)
 
         self.model.decide.side_effect = decide
-        try:
-            result = self.selector.prepare()
-        finally:
-            release.set()
-        self.assertIn("activation-guide", result.context)
-        self.assertNotIn("slow-guide", result.context)
-        self.assertEqual(self.selector.observation["unscored_count"], 1)
+        result = self.selector.prepare()
+        self.assertEqual(result.context, "")
+        self.assertEqual(result.mode, "treatment")
+        self.assertEqual(result.reason, reason)
+        if outcome != "empty":
+            self.assertEqual(self.selector.observation["selection_step"], "rerank")
 
     def test_render_enforces_budget_deduplication_and_untrusted_delimiters(self) -> None:
         record = Candidate(
@@ -340,9 +346,40 @@ class TestSelectionGateway(SimpleTestCase):
                 },
             ),
         ) as post:
-            self.assertEqual(selector.score(time.monotonic() + 60), 0.9)
+            self.assertEqual(selector.gate(time.monotonic() + 60), 0.9)
         self.assertIn("ai-gateway.example.com", post.call_args.args[0])
         self.assertEqual(post.call_args.kwargs["json"]["state"], {"user_request": "request", "history": "history"})
         headers = str(post.call_args.kwargs["headers"])
         for value in (selector.selection_id, "task_run_id", "message_id"):
             self.assertIn(value, headers)
+
+        candidates = [
+            Candidate(
+                id="shared-id",
+                kind="skill" if i % 2 == 0 else "metric",
+                title=f"Reference {i}",
+                text="Activation definition" if i % 2 == 0 else "Unrelated definition",
+                reference=f"source-{i}",
+            )
+            for i in range(32)
+        ]
+        with patch(
+            "httpx.Client.post",
+            return_value=httpx.Response(
+                200,
+                json={
+                    "model": "posthog/hogference/test-decision-model",
+                    "answers": {f"candidate_{i}": {"noul": 0.9 if i % 2 == 0 else 0.1} for i in reversed(range(32))},
+                },
+            ),
+        ) as post:
+            scored = selector.rerank(candidates, time.monotonic() + 60)
+        self.assertEqual(scored, [(candidate, 0.9 if i % 2 == 0 else 0.1) for i, candidate in enumerate(candidates)])
+        self.assertEqual(post.call_count, 1)
+        body = post.call_args.kwargs["json"]
+        self.assertEqual(len(body["questions"]), 32)
+        for i, candidate in enumerate(candidates):
+            key = f"candidate_{i}"
+            self.assertEqual(body["state"]["candidates"][key]["reference"], candidate.reference)
+            self.assertIn(f"state.candidates.{key}", body["questions"][key]["instructions"])
+        self.assertIn("rerank", str(post.call_args.kwargs["headers"]))

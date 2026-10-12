@@ -721,7 +721,8 @@ When the gate passes, the selector calls the existing skill search, catalog list
 There is no separate projection or refresh job. Candidate counts are bounded per source.
 Each source endpoint enforces its existing OAuth scopes, project restrictions, and actor permissions.
 The selector does not maintain a separate source or conversation-audience permission policy.
-System One reranks the returned candidates concurrently. References link to the retrieved sources; skill references pin the matched published version.
+System One reranks up to 32 returned candidates in one request, with an independent relevance question for each candidate.
+References link to the retrieved sources; skill references pin the matched published version.
 At most five references and 8,000 characters survive into a hidden context block, identified by `selection_id`.
 Retrieved content is data to verify through existing tools, rather than instructions or approval.
 Skill references contain descriptions, so the prompt requires `skill-get` with the referenced name and version before the agent relies on or follows a skill.
@@ -734,15 +735,15 @@ Control skips retrieval. Shadow records the selected bundle without injecting it
 Selection has a three-second budget by default. Saturation, timeout, and selection failures leave the ordinary prompt flow available.
 Source requests run concurrently and use at most half the remaining budget, leaving time to score ready results.
 A denied, failed, or slow source does not suppress results from other sources.
-Reranking reserves time to pack completed scores even if another scorer times out.
+A failed or incomplete reranking response skips enrichment for the turn; individual scores are not recovered from a failed batch.
 Source lookup uses the current project endpoint; the selector does not expand the credential to a parent project.
 The agent truncates requests and history and validates the context budget in Unicode code points, matching the backend renderer.
 Native and summary resumes preserve bounded prior conversation history for later turns; a successful `/clear` resets selection history.
 Actor refreshes update the selection credential. Flag eligibility is checked on each human turn.
 Startup preparation shares the message-delivery queue with follow-ups, preserving prompt order.
 Cancellation during preparation prevents the prepared prompt from reaching the model.
-Selection spans record gate failures and source or scorer errors. Reranking records candidate identifiers and scores.
-The selector uses one implementation for source retrieval, scoring, and bounded rendering. Retrieval and scoring share a bounded worker collector.
+Selection spans record gate failures, source errors, and reranking failures. Reranking records candidate identifiers and scores.
+The selector uses one implementation for source retrieval, scoring, and bounded rendering. Only source retrieval uses the bounded worker pool.
 
 A best-effort `Context selection` LLM span records the outcome, scores, retrieval time, and exact bounded bundle.
 Its `selection_id`, `task_id`, `task_run_id`, and `message_id` connect it to System One calls and the hidden marker in downstream model input.
