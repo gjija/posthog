@@ -106,6 +106,7 @@ from products.access_control.backend.presentation.access_control import (
 )
 from products.messaging.backend.presentation.views.serializers import DesignOperationSerializer
 from products.notifications.backend.facade.api import publish_resource_edited
+from products.replay_vision.backend.facade.api import ObservationRequestRejected, parse_workflow_scan_setup
 from products.tasks.backend.facade.api import list_workflow_last_runs
 from products.tasks.backend.facade.contracts import WorkflowLastRunDTO
 from products.tasks.backend.facade.model_catalogue import TASK_RUN_GATEWAY_PRODUCT, available_model_choices
@@ -492,6 +493,10 @@ _CREATE_TASK_TEMPLATE_ID = "template-posthog-create-task"
 # build panel only hides the node, and the catalog still advertises it to a child-environment
 # workflow built through the API or MCP.
 _RUN_SCOUT_TEMPLATE_ID = "template-posthog-run-scout"
+
+# The scan runs as the workflow's owner, but whoever saves the step chooses which sessions it reads and
+# where the answers go, so the editor needs recording access too.
+_REPLAY_VISION_TEMPLATE_ID = "template-posthog-replay-vision"
 
 _REPOSITORY_SHAPE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
@@ -1398,6 +1403,26 @@ class HogFlowActionSerializer(serializers.Serializer):
                     }
                 )
 
+    def _validate_replay_vision_action(self, inputs: dict, *, strict: bool) -> None:
+        """Reject the Replay Vision step from an editor who can't view recordings, so editing someone
+        else's workflow can't forward recordings the editor may not read, and an incomplete scan setup."""
+        if strict:
+            try:
+                parse_workflow_scan_setup((inputs.get("analysis") or {}).get("value"))
+            except ObservationRequestRejected as rejected:
+                raise serializers.ValidationError({"inputs": {"analysis": rejected.detail}})
+        get_team = self.context.get("get_team")
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if get_team is None or user is None or not user.is_authenticated or isinstance(user, SyntheticUser):
+            return
+        if not UserAccessControl(user=user, team=get_team()).check_access_level_for_resource(
+            "session_recording", "viewer"
+        ):
+            raise serializers.ValidationError(
+                {"template_id": "You need access to session recordings to use the Replay Vision step."}
+            )
+
     def _validate_run_scout_action(self) -> None:
         """Save-time check for the "Run scout" step: reject it in a child environment, matching
         the runtime refusal in start_workflow_scout_run, so a broken step fails at save instead of
@@ -1678,6 +1703,8 @@ class HogFlowActionSerializer(serializers.Serializer):
                     self._validate_create_task_action(data["config"]["inputs"])
                 if strict and template_id == _RUN_SCOUT_TEMPLATE_ID:
                     self._validate_run_scout_action()
+                if template_id == _REPLAY_VISION_TEMPLATE_ID:
+                    self._validate_replay_vision_action(data["config"]["inputs"], strict=strict)
 
         # Branch types fan out via 'branch' edges indexed into these arrays; a node stored without
         # its array crashes the editor panel and assigns nothing at runtime. Presence is only
