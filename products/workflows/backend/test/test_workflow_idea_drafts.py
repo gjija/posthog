@@ -95,7 +95,6 @@ class TestWorkflowIdeaDrafts(SimpleTestCase):
             key="trial-nudge",
             title="Nudge trials toward a plan",
             rationale="Few trials pick a plan in week one.",
-            value_tier="revenue",
             evidence={"reachable_people": 1000, "baseline_rate": 0.2, "measured_at": "2026-01-05"},
             spec=_spec(),
         )

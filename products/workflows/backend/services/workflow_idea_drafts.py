@@ -74,7 +74,6 @@ def new_idea_from_draft(
     key: str,
     title: str,
     rationale: str,
-    value_tier: str,
     evidence: dict[str, Any],
     spec: IdeaDraftSpec,
 ) -> NewWorkflowIdea:
@@ -84,7 +83,6 @@ def new_idea_from_draft(
         key=key,
         title=title,
         rationale=rationale,
-        value_tier=value_tier,
         definition=build_idea_definition(spec),
         evidence={
             **evidence,
