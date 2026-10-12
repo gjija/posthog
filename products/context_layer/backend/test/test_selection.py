@@ -83,8 +83,12 @@ class TestSelection(SimpleTestCase):
     def respond(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         path = request.url.path.split("/42/")[1]
+        status = 200 if path == "llm_skills/search/" else self.status
+        rows = self.rows.get(path, [])
         return httpx.Response(
-            200 if path == "llm_skills/search/" else self.status, json={"results": self.rows.get(path, [])}
+            status,
+            headers={"Location": "https://other.example.com/"} if status == 302 else {},
+            json=rows if path == "business_knowledge/documents/search/" else {"results": rows},
         )
 
     def test_current_credential_and_all_source_shapes(self) -> None:
