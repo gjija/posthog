@@ -77,25 +77,39 @@ describe("cloud context selection", () => {
     expect(send).toHaveBeenCalledWith(prompt);
   });
 
-  it("keeps bounded user and assistant history for follow-ups", async () => {
-    const { api, selector, send } = fixture();
-    await selector.dispatch("r", "m", prompt, send);
-    selector.recordAssistant("r", "Activation means the first useful action.");
-    await selector.dispatch(
-      "r",
-      "m2",
-      [{ type: "text", text: "What about last week?" }],
-      send,
-    );
-    expect(api.prepareContextSelection.mock.calls[1][0].history).toContain(
-      "first useful action",
-    );
-    selector.recordAssistant("r", "x".repeat(20_000));
-    await selector.dispatch("r", "m3", prompt, send);
-    expect(
-      api.prepareContextSelection.mock.calls[2][0].history.length,
-    ).toBeLessThanOrEqual(12_000);
-  });
+  it.each(["x", "😀"])(
+    "keeps bounded Unicode history and prompts: %s",
+    async (character) => {
+      const { api, selector, send } = fixture();
+      await selector.dispatch("r", "m", prompt, send);
+      selector.recordAssistant(
+        "r",
+        "Activation means the first useful action.",
+      );
+      await selector.dispatch(
+        "r",
+        "m2",
+        [{ type: "text", text: "What about last week?" }],
+        send,
+      );
+      expect(api.prepareContextSelection.mock.calls[1][0].history).toContain(
+        "first useful action",
+      );
+      selector.recordAssistant("r", character.repeat(12_001));
+      await selector.dispatch(
+        "r",
+        "m3",
+        [{ type: "text", text: character.repeat(20_001) }],
+        send,
+      );
+      expect(
+        Array.from(api.prepareContextSelection.mock.calls[2][0].history).length,
+      ).toBe(12_000);
+      expect(api.prepareContextSelection.mock.calls[2][0].prompt).toBe(
+        character.repeat(20_000),
+      );
+    },
+  );
 
   it("preserves adapter failures", async () => {
     const { selector, send } = fixture();

@@ -1,25 +1,19 @@
 import time
-from concurrent.futures import ThreadPoolExecutor, wait
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from threading import BoundedSemaphore, Lock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from django.conf import settings
-from django.db import close_old_connections
 
 import structlog
 
-from posthog.models.scoping import team_scope
-from posthog.models.team.team import Team
 from posthog.models.user import User
 from posthog.ph_client import get_feature_flag_or_none, ph_background_capture
 
 from products.context_layer.backend.selection_model import SelectionJudge
-from products.context_layer.backend.selection_search import render
-from products.context_layer.backend.selection_sources import (
-    search_business_knowledge,
-    search_sources,
-    validate_candidates,
-)
+from products.context_layer.backend.selection_search import RenderedContext, render
+from products.context_layer.backend.selection_sources import SOURCE_PATHS, SelectionSources
 from products.context_layer.backend.selection_types import (
     CONFIG_VERSION,
     GATE_THRESHOLD,
@@ -27,6 +21,7 @@ from products.context_layer.backend.selection_types import (
     PreparedContext,
     SelectionInput,
 )
+from products.tasks.backend.facade.api import is_current_task_run_actor
 from products.tasks.backend.models import Task, TaskRun
 
 logger = structlog.get_logger(__name__)
@@ -34,24 +29,35 @@ logger = structlog.get_logger(__name__)
 # Busy processes skip optional context rather than accumulate unbounded work.
 _EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="context-selection")
 _CAPACITY = BoundedSemaphore(64)
-_SEARCH_CAPACITY = BoundedSemaphore(1)
-_SEARCH_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="context-knowledge")
 
 
-def _search(team: Team, actor: User, prompt: str) -> list[Candidate]:
-    close_old_connections()
+class SelectionDenied(PermissionError):
+    pass
+
+
+class SelectionRunNotFound(LookupError):
+    pass
+
+
+def get_selection_run(team_id: int, run_id: UUID, task_id: UUID, actor: User) -> TaskRun:
     try:
-        with team_scope(team.id):
-            return search_business_knowledge(team, actor, prompt)
-    finally:
-        close_old_connections()
+        run = TaskRun.objects.select_related("task__created_by", "team__organization", "task__team").get(
+            id=run_id,
+            team_id=team_id,
+            task_id=task_id,
+        )
+    except TaskRun.DoesNotExist as error:
+        raise SelectionRunNotFound() from error
+    if not is_current_task_run_actor(run.team_id, run.id, actor.id):
+        raise SelectionDenied("The credential no longer belongs to the current actor.")
+    if run.status != TaskRun.Status.IN_PROGRESS or run.environment != TaskRun.Environment.CLOUD:
+        raise SelectionDenied("The cloud run is not active.")
+    return run
 
 
 def selection_mode(run: TaskRun, actor: User) -> str:
     if (
-        not actor.is_staff
-        or run.team_id not in settings.CONTEXT_SELECTION_ALLOWED_TEAM_IDS
-        or run.task.runtime != Task.Runtime.ACP
+        run.task.runtime != Task.Runtime.ACP
         or (run.state or {}).get("runtime_adapter", "claude") not in ("claude", "codex")
         or run.environment != TaskRun.Environment.CLOUD
         or run.task.origin_product not in (Task.OriginProduct.POSTHOG_AI, Task.OriginProduct.SLACK)
@@ -62,7 +68,6 @@ def selection_mode(run: TaskRun, actor: User) -> str:
         str(run.task_id),
         groups={"organization": str(run.team.organization_id), "project": str(run.team_id)},
         group_properties={"organization": {"id": str(run.team.organization_id)}, "project": {"id": str(run.team_id)}},
-        person_properties={"is_staff": actor.is_staff},
         send_feature_flag_events=False,
     )
     return str(value) if value in ("shadow", "control", "treatment") else "disabled"
@@ -73,7 +78,7 @@ def check_deadline(deadline: float) -> None:
         raise TimeoutError("selector_deadline")
 
 
-def prepare(run: TaskRun, actor: User, selection: SelectionInput, scopes: set[str]) -> PreparedContext:
+def prepare(run: TaskRun, actor: User, selection: SelectionInput, sources: SelectionSources) -> PreparedContext:
     started = time.monotonic()
     selection_id = str(uuid4())
     mode = "disabled"
@@ -96,7 +101,9 @@ def prepare(run: TaskRun, actor: User, selection: SelectionInput, scopes: set[st
         elif mode == "control":
             reason = "control"
         else:
-            context, reason = _select(run, actor, selection, scopes, selection_id, deadline, properties, observation)
+            rendered = _select(actor, selection, sources, selection_id, deadline, properties, observation)
+            context = rendered.context
+            reason = str(observation["reason"])
     except Exception as error:
         context, reason = "", "error"
         observation["error_type"] = type(error).__name__
@@ -129,16 +136,27 @@ def prepare(run: TaskRun, actor: User, selection: SelectionInput, scopes: set[st
     )
 
 
+def _submit[T, **P](operation: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> Future[T] | None:
+    if not _CAPACITY.acquire(blocking=False):
+        return None
+    try:
+        future = _EXECUTOR.submit(operation, *args, **kwargs)
+    except Exception:
+        _CAPACITY.release()
+        raise
+    future.add_done_callback(lambda _: _CAPACITY.release())
+    return future
+
+
 def _select(
-    run: TaskRun,
     actor: User,
     selection: SelectionInput,
-    scopes: set[str],
+    sources: SelectionSources,
     selection_id: str,
     deadline: float,
     properties: dict[str, str],
     observation: dict[str, object],
-) -> tuple[str, str]:
+) -> RenderedContext:
     check_deadline(deadline)
     errors: list[dict[str, str]] = []
     error_lock = Lock()
@@ -152,59 +170,54 @@ def _select(
     judge = SelectionJudge(selection_id, str(actor.distinct_id), deadline, properties, report_error)
     gate = judge.judge(selection.prompt, selection.history)
     observation["gate_probability"] = gate
-    if gate is None:
-        return "", "gate_error"
-    if gate <= GATE_THRESHOLD:
-        return "", "gate_skipped"
+    if gate is None or gate <= GATE_THRESHOLD:
+        observation["reason"] = "gate_error" if gate is None else "gate_skipped"
+        return render([], selection_id)
     started = time.monotonic()
-    knowledge = None
-    if "business_knowledge:read" in scopes and _SEARCH_CAPACITY.acquire(blocking=False):
+    retrieval_deadline = started + max(0, (deadline - started) / 2)
+    searches = {}
+    for kind in SOURCE_PATHS:
+        search_future = _submit(sources.search, kind, selection.prompt, selection.history, retrieval_deadline)
+        if search_future is not None:
+            searches[search_future] = kind
+    search_done, search_unfinished = wait(searches, timeout=max(0, retrieval_deadline - time.monotonic()))
+    candidates: list[Candidate] = []
+    source_errors: dict[str, str] = {}
+    for search_future in search_done:
         try:
-            knowledge = _SEARCH_EXECUTOR.submit(_search, run.team, actor, selection.prompt)
-        except Exception:
-            _SEARCH_CAPACITY.release()
-            raise
-        knowledge.add_done_callback(lambda _: _SEARCH_CAPACITY.release())
-    try:
-        candidates = search_sources(run.team, actor, selection.prompt + "\n" + selection.history, scopes)
-        if knowledge is not None:
-            try:
-                # Reserve half the remaining budget for scoring sources that are already ready.
-                candidates.extend(knowledge.result(timeout=max(0, (deadline - time.monotonic()) / 2)))
-            except Exception as error:
-                observation["knowledge_error"] = type(error).__name__
-    finally:
-        if knowledge is not None:
-            knowledge.cancel()
+            candidates.extend(search_future.result())
+        except Exception as error:
+            source_errors[searches[search_future]] = type(error).__name__
+    for search_future in search_unfinished:
+        search_future.cancel()
+        source_errors[searches[search_future]] = "TimeoutError"
+    observation["source_errors"] = source_errors
     observation["retrieval_seconds"] = time.monotonic() - started
     observation["candidate_count"] = len(candidates)
     check_deadline(deadline)
+    # Leave time to pack completed scores even when another candidate times out.
+    scoring_deadline = deadline - min(0.25, max(0, deadline - time.monotonic()) / 4)
+    judge.deadline = scoring_deadline
     pending = {}
     for candidate in candidates:
-        if not _CAPACITY.acquire(blocking=False):
-            continue
-        try:
-            future = _EXECUTOR.submit(judge.judge, selection.prompt, selection.history, candidate)
-        except Exception:
-            _CAPACITY.release()
-            raise
-        future.add_done_callback(lambda _: _CAPACITY.release())
-        pending[future] = candidate
-    done, unfinished = wait(pending, timeout=max(0, deadline - time.monotonic()))
+        future = _submit(judge.judge, selection.prompt, selection.history, candidate)
+        if future is not None:
+            pending[future] = candidate
+    done, unfinished = wait(pending, timeout=max(0, scoring_deadline - time.monotonic()))
     scored: list[tuple[Candidate, float]] = []
     for future in done:
-        probability = future.result()
-        if probability is not None:
-            scored.append((pending[future], probability))
+        try:
+            probability = future.result()
+            if probability is not None:
+                scored.append((pending[future], probability))
+        except Exception as error:
+            report_error(pending[future].id, type(error).__name__)
     observation["unscored_count"] = len(candidates) - len(scored)
     for future in unfinished:
         future.cancel()
     check_deadline(deadline)
-    # Definitions and access can change while the external scorer runs.
-    current = {(c.kind, c.id): c for c in validate_candidates(run.team, actor, [c for c, _ in scored])}
-    scored = [(c, score) for c, score in scored if current.get((c.kind, c.id)) == c]
-    check_deadline(deadline)
     rendered = render(scored, selection_id)
     observation["decisions"] = rendered.decisions
     observation["selected_ids"] = rendered.selected_ids
-    return rendered.context, "selected" if rendered.selected_ids else "empty"
+    observation["reason"] = "selected" if rendered.selected_ids else "empty"
+    return rendered

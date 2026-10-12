@@ -1,41 +1,32 @@
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier, BoundedSemaphore, Event
+from threading import BoundedSemaphore, Event
 from types import SimpleNamespace
 from uuid import uuid4
 
-from posthog.test.base import BaseTest
 from unittest.mock import patch
 
-from django.db import DatabaseError
 from django.test import SimpleTestCase, override_settings
 
 import httpx
 from parameterized import parameterized
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.parsers import JSONParser
 from rest_framework.request import Request
 from rest_framework.test import APIRequestFactory
 
 from posthog.llm.system_one import JsonValue, NoulAnswer, Question, SystemOneResult
 from posthog.models.organization import Organization
-from posthog.models.scoping import team_scope
 from posthog.models.team.team import Team
 from posthog.models.user import User
 
-from products.access_control.backend.models.access_control import AccessControl
-from products.business_knowledge.backend.logic import create_text_source
-from products.business_knowledge.backend.models import KnowledgeDocument, SafetyVerdict
-from products.context_layer.backend.facade.api import context_selection_enabled_for_run
+from products.context_layer.backend.presentation.selection import ContextSelectionViewSet, PrepareSerializer
 from products.context_layer.backend.selection_execution import SelectionUnavailable, bounded_request
 from products.context_layer.backend.selection_model import SelectionJudge
 from products.context_layer.backend.selection_search import render
-from products.context_layer.backend.selection_service import prepare, selection_mode
-from products.context_layer.backend.selection_sources import (
-    search_business_knowledge,
-    search_sources,
-    validate_candidates,
-)
+from products.context_layer.backend.selection_service import SelectionDenied, get_selection_run, prepare, selection_mode
+from products.context_layer.backend.selection_sources import SelectionSources
 from products.context_layer.backend.selection_types import (
     MAX_CONTEXT_CHARS,
     Candidate,
@@ -43,9 +34,6 @@ from products.context_layer.backend.selection_types import (
     SelectionInput,
     SourceKind,
 )
-from products.context_layer.backend.selection_views import ContextSelectionViewSet, PrepareSerializer
-from products.data_catalog.backend.facade import api as catalog
-from products.skills.backend.models.skills import LLMSkill
 from products.tasks.backend.models import Task, TaskRun
 
 
@@ -99,7 +87,7 @@ class TestSelectionSearch(SimpleTestCase):
         self.assertIn("\\u003c", result.context)
 
 
-@override_settings(CONTEXT_SELECTION_ALLOWED_TEAM_IDS=[42], CONTEXT_SELECTION_TIMEOUT_SECONDS=3)
+@override_settings(CONTEXT_SELECTION_TIMEOUT_SECONDS=60)
 class TestSelectionOrchestration(SimpleTestCase):
     def setUp(self) -> None:
         self.actor = User(id=5, is_staff=True, distinct_id="actor")
@@ -107,19 +95,13 @@ class TestSelectionOrchestration(SimpleTestCase):
         task = Task(id=uuid4(), team=team, origin_product="posthog_ai")
         self.task_run = TaskRun(id=uuid4(), team=team, task=task, environment="cloud")
 
-    @parameterized.expand([("database", DatabaseError), ("missing_run", TaskRun.DoesNotExist)])
-    @patch("products.tasks.backend.models.TaskRun.objects.select_related")
-    def test_startup_eligibility_failure_disables_selection(self, name, error_type, lookup) -> None:
-        lookup.return_value.get.side_effect = error_type("unavailable")
-        self.assertFalse(context_selection_enabled_for_run(self.task_run.team_id, self.task_run.id, self.actor))
-
     @patch("products.context_layer.backend.selection_service.get_feature_flag_or_none", return_value="treatment")
-    def test_assignment_uses_conversation_and_requires_internal_staff(self, flag) -> None:
+    def test_assignment_uses_conversation_without_a_staff_or_team_gate(self, flag) -> None:
         self.assertEqual(selection_mode(self.task_run, self.actor), "treatment")
         self.assertEqual(flag.call_args.args[1], str(self.task_run.task_id))
         self.actor.is_staff = False
-        self.assertEqual(selection_mode(self.task_run, self.actor), "disabled")
-        self.assertEqual(flag.call_count, 1)
+        self.assertEqual(selection_mode(self.task_run, self.actor), "treatment")
+        self.assertEqual(flag.call_count, 2)
 
     @parameterized.expand(
         [
@@ -150,7 +132,12 @@ class TestSelectionOrchestration(SimpleTestCase):
             patch("products.context_layer.backend.selection_service.get_feature_flag_or_none", return_value="control"),
             patch("products.context_layer.backend.selection_service.ph_background_capture") as capture,
         ):
-            result = prepare(self.task_run, self.actor, SelectionInput(message_id="m", prompt="activation"), set())
+            result = prepare(
+                self.task_run,
+                self.actor,
+                SelectionInput(message_id="m", prompt="activation"),
+                SelectionSources(42, "Bearer fake-token"),
+            )
         self.assertEqual(result.context, "")
         self.assertEqual(result.reason, "control")
         self.assertEqual(capture.return_value.call_args.kwargs["properties"]["$ai_output_state"]["reason"], "control")
@@ -158,260 +145,184 @@ class TestSelectionOrchestration(SimpleTestCase):
 
 class TestSelectionPermissions(SimpleTestCase):
     def test_session_credentials_cannot_prepare_context(self) -> None:
+        request = Request(
+            APIRequestFactory().post(
+                "/", {"run_id": str(uuid4()), "message_id": "m", "prompt": "question"}, format="json"
+            ),
+            parsers=[JSONParser()],
+        )
+        request.user = User(id=5)
         with (
-            patch("products.context_layer.backend.selection_views.get_oauth_access_token", return_value=None),
-            patch("products.context_layer.backend.selection_views.is_sandbox_oauth_request", return_value=False),
+            patch("products.context_layer.backend.presentation.selection.get_oauth_access_token", return_value=None),
+            patch("products.context_layer.backend.presentation.selection.is_sandbox_oauth_request", return_value=False),
             self.assertRaises(PermissionDenied),
         ):
-            ContextSelectionViewSet()._run(Request(APIRequestFactory().post("/")), uuid4())
+            ContextSelectionViewSet.prepare(ContextSelectionViewSet(), request)
 
     def test_run_lookup_is_bound_to_credential_task_and_project(self) -> None:
-        view = ContextSelectionViewSet()
-        view.__dict__["team_id"] = 42
-        run_id = uuid4()
-        request = Request(APIRequestFactory().post("/"))
-        request.user = User(id=5)
+        run_id, task_id = uuid4(), uuid4()
+        actor = User(id=5)
         run = SimpleNamespace(id=run_id, team_id=42, status="in_progress", environment="cloud")
         with (
+            patch("products.context_layer.backend.selection_service.TaskRun.objects.select_related") as lookup,
             patch(
-                "products.context_layer.backend.selection_views.get_oauth_access_token",
-                return_value=SimpleNamespace(sandbox_task_id="bound-task"),
-            ),
-            patch("products.context_layer.backend.selection_views.is_sandbox_oauth_request", return_value=True),
-            patch("products.context_layer.backend.selection_views.get_object_or_404", return_value=run) as lookup,
-            patch(
-                "products.context_layer.backend.selection_views.is_current_task_run_actor", return_value=True
-            ) as actor,
+                "products.context_layer.backend.selection_service.is_current_task_run_actor", return_value=True
+            ) as current,
         ):
-            self.assertIs(view._run(request, run_id), run)
-            self.assertEqual(lookup.call_args.kwargs, {"id": run_id, "team_id": 42, "task_id": "bound-task"})
-            actor.return_value = False
-            with self.assertRaises(PermissionDenied):
-                view._run(request, run_id)
+            lookup.return_value.get.return_value = run
+            self.assertIs(get_selection_run(42, run_id, task_id, actor), run)
+            self.assertEqual(
+                lookup.return_value.get.call_args.kwargs, {"id": run_id, "team_id": 42, "task_id": task_id}
+            )
+            current.return_value = False
+            with self.assertRaises(SelectionDenied):
+                get_selection_run(42, run_id, task_id, actor)
 
 
-class TestLiveSelection(BaseTest):
+@override_settings(SITE_URL="https://posthog.example.com", CONTEXT_SELECTION_TIMEOUT_SECONDS=60)
+class TestSelectionSources(SimpleTestCase):
     def setUp(self) -> None:
-        super().setUp()
-        self.user.is_staff = True
-        self.user.save(update_fields=["is_staff"])
+        self.actor = User(id=5, distinct_id="actor")
+        self.team = Team(id=42, organization=Organization(id=uuid4()))
         self.task_run = TaskRun(
-            team=self.team, task=Task(id=uuid4(), team=self.team, origin_product="posthog_ai"), environment="cloud"
+            id=uuid4(),
+            team=self.team,
+            task=Task(id=uuid4(), team=self.team, origin_product="posthog_ai"),
+            environment="cloud",
         )
+        self.sources = SelectionSources(42, "Bearer fake-sandbox-token")
+        self.requests: list[httpx.Request] = []
+        self.skill = {"name": "activation-guide", "version": 3, "description": "Activation definition"}
 
     def select(
         self,
+        handler: Callable[[httpx.Request], httpx.Response],
         *,
         mode: str = "treatment",
-        probability: float = 0.9,
         decide: Callable[..., SystemOneResult] | None = None,
-        scopes: set[str] | None = None,
     ) -> PreparedContext:
+        client_class = httpx.Client
+        transport = httpx.MockTransport(handler)
         with (
-            override_settings(CONTEXT_SELECTION_ALLOWED_TEAM_IDS=[self.team.id], CONTEXT_SELECTION_TIMEOUT_SECONDS=10),
-            team_scope(self.team.id),
             patch("products.context_layer.backend.selection_service.get_feature_flag_or_none", return_value=mode),
-            patch("products.context_layer.backend.selection_model.build_system_one_client") as client,
+            patch(
+                "products.context_layer.backend.selection_sources.httpx.Client",
+                side_effect=lambda **kwargs: client_class(transport=transport, **kwargs),
+            ),
+            patch("products.context_layer.backend.selection_model.build_system_one_client") as model,
+            patch("products.context_layer.backend.selection_service.ph_background_capture") as capture,
         ):
-            client.return_value.decide.return_value = SystemOneResult(
-                model="test", answers={"useful": NoulAnswer(probability=probability)}, input_tokens=1
+            model.return_value.decide.return_value = SystemOneResult(
+                model="test",
+                answers={"useful": NoulAnswer(probability=0.95)},
+                input_tokens=1,
             )
-            client.return_value.decide.side_effect = decide
-            return prepare(
-                self.task_run,
-                self.user,
-                SelectionInput(message_id="m", prompt="activation"),
-                scopes if scopes is not None else {"llm_skill:read"},
+            model.return_value.decide.side_effect = decide
+            result = prepare(
+                self.task_run, self.actor, SelectionInput(message_id="m", prompt="activation"), self.sources
             )
+            self.span = capture.return_value.call_args.kwargs["properties"]
+        return result
 
-    def test_live_search_sees_edits_and_deletions_without_refresh(self) -> None:
-        skill = LLMSkill.objects.create(team=self.team, name="guide", description="activation process", body="guide")
-        with team_scope(self.team.id):
-            self.assertEqual(
-                [c.id for c in search_sources(self.team, self.user, "activation", {"llm_skill:read"})], [str(skill.id)]
-            )
-            skill.description = "retention process"
-            skill.save(update_fields=["description"])
-            self.assertEqual(search_sources(self.team, self.user, "activation", {"llm_skill:read"}), [])
-            self.assertEqual(
-                [c.id for c in search_sources(self.team, self.user, "retention", {"llm_skill:read"})], [str(skill.id)]
-            )
-            skill.deleted = True
-            skill.save(update_fields=["deleted"])
-            self.assertEqual(search_sources(self.team, self.user, "retention", {"llm_skill:read"}), [])
+    def response(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if "llm_skills" in request.url.path:
+            return httpx.Response(200, json={"count": 1, "results": [self.skill]})
+        return httpx.Response(200, json=[])
 
-    def test_search_respects_team_scopes_and_shared_access(self) -> None:
-        skill = LLMSkill.objects.create(team=self.team, name="activation", description="activation", body="guide")
-        other = self.organization.teams.create(name="Other")
-        LLMSkill.objects.create(team=other, name="foreign", description="activation", body="guide")
-        with team_scope(self.team.id):
-            self.assertEqual(search_sources(self.team, self.user, "activation", set()), [])
-            self.assertEqual(
-                [c.id for c in search_sources(self.team, self.user, "activation", {"llm_skill:read"})], [str(skill.id)]
-            )
-            AccessControl.objects.create(
-                team=self.team, resource="llm_skill", resource_id=str(skill.id), access_level="none"
-            )
-            self.assertEqual(search_sources(self.team, self.user, "activation", {"llm_skill:read"}), [])
+    def test_source_requests_preserve_the_credential_and_project_boundary(self) -> None:
+        result = self.select(self.response)
+        self.assertIn("skill_name=activation-guide, version=3", result.context)
+        self.assertEqual(len(self.requests), 5)
+        for request in self.requests:
+            self.assertEqual(request.headers["Authorization"], "Bearer fake-sandbox-token")
+            self.assertTrue(request.url.path.startswith("/api/projects/42/"))
+            self.assertEqual(request.url.host, "posthog.example.com")
+        self.assertEqual(self.span["$ai_output_state"]["selected_ids"], ["activation-guide"])
 
-    def test_restricted_matches_do_not_displace_shared_skills(self) -> None:
-        for i in range(18):
-            skill = LLMSkill.objects.create(
-                team=self.team, name=f"activation {i}", description="activation " * 20, body="guide"
-            )
-            AccessControl.objects.create(
-                team=self.team, resource="llm_skill", resource_id=str(skill.id), access_level="viewer"
-            )
-        shared = LLMSkill.objects.create(team=self.team, name="guide", description="activation", body="guide")
-        with team_scope(self.team.id):
-            results = search_sources(self.team, self.user, "activation", {"llm_skill:read"})
-        self.assertEqual([c.id for c in results], [str(shared.id)])
+    @parameterized.expand([(403,), (404,), (429,), (503,)])
+    def test_denied_or_failed_sources_do_not_suppress_other_results(self, status_code: int) -> None:
+        def response(request: httpx.Request) -> httpx.Response:
+            if "llm_skills" in request.url.path:
+                return self.response(request)
+            return httpx.Response(status_code, json={"detail": "Unavailable"})
 
-    @parameterized.expand([("warehouse_objects",), ("warehouse_view",), ("warehouse_table",)])
-    def test_catalog_skips_customized_shared_resource_access(self, resource: str) -> None:
-        catalog.Metric.objects.for_team(self.team.id).create(
-            team=self.team,
-            name="activation",
-            description="activation",
-            definition={"kind": "HogQLQuery", "query": "SELECT count() FROM events"},
-        )
-        AccessControl.objects.create(team=self.team, resource=resource, resource_id=None, access_level="viewer")
-        with team_scope(self.team.id):
-            self.assertEqual(search_sources(self.team, self.user, "activation", {"data_catalog:read"}), [])
+        result = self.select(response)
+        self.assertIn("Activation definition", result.context)
+        self.assertEqual(result.reason, "selected")
+        self.assertEqual(len(self.span["$ai_output_state"]["source_errors"]), 4)
 
-    def test_child_environment_uses_parent_knowledge_and_permissions(self) -> None:
-        child = self.organization.teams.create(name="Environment", parent_team=self.team)
-        source = create_text_source(
-            team_id=self.team.id,
-            created_by_id=self.user.id,
-            name="Activation guide",
-            text="activation means completing onboarding",
-        )
-        with team_scope(self.team.id, canonical=True):
-            KnowledgeDocument.objects.filter(source=source).update(safety_verdict=SafetyVerdict.SAFE)
+    @parameterized.expand([("control",), ("disabled",)])
+    def test_flag_disabled_and_control_do_not_retrieve_sources(self, mode: str) -> None:
+        def response(request: httpx.Request) -> httpx.Response:
+            self.fail("Source retrieval must be skipped")
+
+        client_class = httpx.Client
         with (
-            patch("products.context_layer.backend.selection_sources.posthog_feature_flag_enabled", return_value=True),
-            patch("products.business_knowledge.backend.logic.generate_embedding", side_effect=RuntimeError("offline")),
-            team_scope(child.id),
+            patch("products.context_layer.backend.selection_service.get_feature_flag_or_none", return_value=mode),
+            patch(
+                "products.context_layer.backend.selection_sources.httpx.Client",
+                side_effect=lambda **kwargs: client_class(transport=httpx.MockTransport(response), **kwargs),
+            ),
+            patch("products.context_layer.backend.selection_service.ph_background_capture"),
         ):
-            results = search_business_knowledge(child, self.user, "activation")
-            self.assertEqual(len(results), 1)
-            self.assertIn(f"/projects/{self.team.id}/", results[0].reference)
-            self.assertEqual(validate_candidates(child, self.user, results), results)
-            AccessControl.objects.create(
-                team=self.team, resource="business_knowledge", resource_id=None, access_level="viewer"
+            result = prepare(
+                self.task_run, self.actor, SelectionInput(message_id="m", prompt="activation"), self.sources
             )
-            self.assertEqual(search_business_knowledge(child, self.user, "activation"), [])
-            self.assertEqual(validate_candidates(child, self.user, results), [])
+        self.assertEqual(result.context, "")
+        self.assertEqual(result.mode, mode)
 
-    def test_catalog_search_reads_current_definitions_and_marks_drift(self) -> None:
-        metric = catalog.Metric.objects.for_team(self.team.id).create(
-            team=self.team,
-            name="onboarding_rate",
-            description="Defined company metric",
-            definition={"kind": "HogQLQuery", "query": "SELECT count() FROM events WHERE event = 'activation'"},
-            source_insight_short_id="missing",
-        )
-        with team_scope(self.team.id):
-            results = search_sources(self.team, self.user, "activation", {"data_catalog:read"})
-        self.assertEqual([c.id for c in results], [str(metric.id)])
-        self.assertEqual(results[0].status, "drifted")
-        self.assertIn("activation", results[0].text)
-        self.assertEqual(results[0].reference, f"/api/projects/{self.team.id}/data_catalog/metrics/onboarding_rate/")
-        with team_scope(self.team.id):
-            catalog.Metric.objects.for_team(self.team.id).filter(id=metric.id).update(deleted=True)
-            self.assertEqual(search_sources(self.team, self.user, "activation", {"data_catalog:read"}), [])
+    @parameterized.expand([("shadow", False), ("treatment", True)])
+    def test_selection_span_records_the_bundle_and_injection_variant(self, mode: str, inject: bool) -> None:
+        result = self.select(self.response, mode=mode)
+        self.assertEqual(bool(result.context), inject)
+        self.assertIn("Activation definition", self.span["$ai_output_state"]["context"])
+        self.assertEqual(self.span["selection_id"], result.selection_id)
 
     def test_capture_failure_does_not_suppress_selected_context(self) -> None:
-        skill = LLMSkill.objects.create(
-            team=self.team, name="activation", description="activation process", body="guide"
-        )
-        with patch(
-            "products.context_layer.backend.selection_service.ph_background_capture",
-            side_effect=RuntimeError("offline"),
-        ):
-            result = self.select()
-        self.assertEqual(result.reason, "selected")
-        self.assertIn(str(skill.id), result.context)
-        self.assertIn(result.selection_id, result.context)
-
-    @parameterized.expand([("shadow",), ("treatment",)])
-    def test_selection_span_contains_bounded_context_and_correlation(self, mode: str) -> None:
-        skill = LLMSkill.objects.create(
-            team=self.team, name="activation", description="activation process", body="guide"
-        )
-        with patch("products.context_layer.backend.selection_service.ph_background_capture") as capture:
-            result = self.select(mode=mode)
-        event = capture.return_value.call_args.kwargs
-        self.assertEqual(event["event"], "$ai_span")
-        self.assertEqual(event["properties"]["message_id"], "m")
-        self.assertEqual(event["properties"]["task_run_id"], str(self.task_run.id))
-        output = event["properties"]["$ai_output_state"]
-        self.assertIn(str(skill.id), output["context"])
-        self.assertLessEqual(len(output["context"]), MAX_CONTEXT_CHARS)
-        self.assertEqual(bool(result.context), mode == "treatment")
-
-    def test_candidates_are_reranked_in_parallel(self) -> None:
-        for name in ("activation guide", "activation checklist"):
-            LLMSkill.objects.create(team=self.team, name=name, description="activation process", body="guide")
-        barrier = Barrier(2)
-
-        def decide(*, state: JsonValue, questions: dict[str, Question]) -> SystemOneResult:
-            if isinstance(state, dict) and "candidate" in state:
-                barrier.wait(timeout=5)
-            return SystemOneResult(model="test", answers={"useful": NoulAnswer(probability=0.9)}, input_tokens=1)
-
-        with patch("products.context_layer.backend.selection_service.ph_background_capture"):
-            result = self.select(decide=decide)
-        self.assertEqual(result.reason, "selected")
-        self.assertIn("activation guide", result.context)
-        self.assertIn("activation checklist", result.context)
-
-    def test_slow_knowledge_does_not_suppress_ready_skills(self) -> None:
-        skill = LLMSkill.objects.create(team=self.team, name="activation", description="activation", body="guide")
-        elapsed = 0.0
-
-        def knowledge_timeout(*, timeout: float) -> list[Candidate]:
-            nonlocal elapsed
-            elapsed += timeout
-            raise TimeoutError("knowledge deadline")
-
+        client_class = httpx.Client
         with (
-            patch("products.context_layer.backend.selection_service.time.monotonic", side_effect=lambda: elapsed),
-            patch("products.context_layer.backend.selection_service._SEARCH_EXECUTOR.submit") as submit,
-            patch("products.context_layer.backend.selection_service._SEARCH_CAPACITY", BoundedSemaphore(1)),
-            patch("products.context_layer.backend.selection_service.ph_background_capture") as capture,
+            patch(
+                "products.context_layer.backend.selection_service.get_feature_flag_or_none", return_value="treatment"
+            ),
+            patch(
+                "products.context_layer.backend.selection_sources.httpx.Client",
+                side_effect=lambda **kwargs: client_class(transport=httpx.MockTransport(self.response), **kwargs),
+            ),
+            patch("products.context_layer.backend.selection_model.build_system_one_client") as model,
+            patch("products.context_layer.backend.selection_service.ph_background_capture", side_effect=RuntimeError),
         ):
-            submit.return_value.result.side_effect = knowledge_timeout
-            result = self.select(scopes={"llm_skill:read", "business_knowledge:read"})
-        self.assertEqual(result.reason, "selected")
-        self.assertIn(str(skill.id), result.context)
-        self.assertEqual(
-            capture.return_value.call_args.kwargs["properties"]["$ai_output_state"]["knowledge_error"], "TimeoutError"
-        )
+            model.return_value.decide.return_value = SystemOneResult(
+                model="test",
+                answers={"useful": NoulAnswer(probability=0.95)},
+                input_tokens=1,
+            )
+            result = prepare(
+                self.task_run, self.actor, SelectionInput(message_id="m", prompt="activation"), self.sources
+            )
+        self.assertIn("Activation definition", result.context)
 
-    def test_gate_skip_and_model_failure_leave_prompt_without_context(self) -> None:
-        with (
-            patch("products.context_layer.backend.selection_service.ph_background_capture") as capture,
-            patch("httpx.Client.post", side_effect=httpx.ReadTimeout("offline")),
-        ):
-            self.assertEqual(self.select(probability=0.1).reason, "gate_skipped")
-            with (
-                override_settings(CONTEXT_SELECTION_ALLOWED_TEAM_IDS=[self.team.id]),
-                patch(
-                    "products.context_layer.backend.selection_service.get_feature_flag_or_none",
-                    return_value="treatment",
-                ),
-            ):
-                result = prepare(
-                    self.task_run, self.user, SelectionInput(message_id="m", prompt="activation"), {"llm_skill:read"}
-                )
+    def test_failed_rerank_preserves_other_completed_scores(self) -> None:
+        def response(request: httpx.Request) -> httpx.Response:
+            if "llm_skills" in request.url.path:
+                return httpx.Response(200, json={"results": [self.skill, {**self.skill, "name": "slow-guide"}]})
+            return httpx.Response(200, json=[])
+
+        def decide(*, state: dict[str, JsonValue], questions: dict[str, Question]) -> SystemOneResult:
+            record = state.get("candidate")
+            if isinstance(record, dict) and record.get("id") == "slow-guide":
+                raise httpx.ReadTimeout("Timed out")
+            return SystemOneResult(model="test", answers={"useful": NoulAnswer(probability=0.95)}, input_tokens=1)
+
+        result = self.select(response, decide=decide)
+        self.assertIn("activation-guide", result.context)
+        self.assertNotIn("slow-guide", result.context)
+        self.assertEqual(self.span["$ai_output_state"]["unscored_count"], 1)
+
+    def test_source_redirects_do_not_forward_credentials_to_another_origin(self) -> None:
+        result = self.select(lambda request: httpx.Response(302, headers={"Location": "https://other.example.com/"}))
         self.assertEqual(result.context, "")
-        self.assertEqual(result.reason, "gate_error")
-        errors = capture.return_value.call_args.kwargs["properties"]["$ai_output_state"]["scorer_errors"]
-        self.assertEqual(len(errors), 1)
-        self.assertEqual(errors[0]["candidate_id"], "")
-        self.assertTrue(errors[0]["error_type"])
+        self.assertEqual(self.span["$ai_output_state"]["candidate_count"], 0)
 
 
 class TestSelectionDeadline(SimpleTestCase):

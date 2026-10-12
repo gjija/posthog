@@ -6,13 +6,14 @@ Thin: validate via the serializer, call the facade, serialize the result. Domain
 
 from typing import cast
 
-from django.db.models import QuerySet
+from django.db.models import Q, QuerySet
 
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action as drf_action
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.filters import SearchFilter
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.throttling import BaseThrottle
@@ -61,11 +62,25 @@ def _resolve_bulk_metrics(
     )
 
 
+class CatalogSearchFilter(SearchFilter):
+    def filter_queryset(self, request: Request, queryset: QuerySet, view: APIView) -> QuerySet:
+        terms = self.get_search_terms(request)
+        if not terms:
+            return queryset
+        condition = Q()
+        for term in terms[:60]:
+            for field in self.get_search_fields(view, request) or []:
+                condition |= Q(**{f"{field}__icontains": term})
+        return queryset.filter(condition).distinct()
+
+
 class MetricViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
     """CRUD for catalog metrics, addressed by their ``name`` (e.g. /metrics/mrr/)."""
 
     scope_object = "data_catalog"
     lookup_field = "name"
+    filter_backends = [CatalogSearchFilter]
+    search_fields = ["name", "description", "definition"]
     serializer_class = MetricSerializer
     queryset = Metric.objects.unscoped()
 
@@ -274,6 +289,8 @@ class CertificationViewSet(
     """Trust marks on warehouse tables and views. Reads exclude soft-deleted targets."""
 
     scope_object = "data_catalog"
+    filter_backends = [CatalogSearchFilter]
+    search_fields = ["table__name", "saved_query__name", "notes"]
     serializer_class = CertificationSerializer
     queryset = TableCertification.objects.unscoped()
 
@@ -340,6 +357,8 @@ class RelationshipProposalViewSet(
     """Reviewed join facts. Accepting one promotes it to a real DataWarehouseJoin; rejections persist."""
 
     scope_object = "data_catalog"
+    filter_backends = [CatalogSearchFilter]
+    search_fields = ["source_table_name", "joining_table_name", "reasoning"]
     serializer_class = RelationshipProposalSerializer
     queryset = RelationshipProposal.objects.unscoped()
 

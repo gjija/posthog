@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     from posthog.llm.system_one import JsonValue
 
 SourceKind = Literal["skill", "metric", "certification", "relationship", "business_knowledge"]
-CONFIG_VERSION = "context-selection-v5"
+CONFIG_VERSION = "context-selection-v6"
 MAX_PROMPT_CHARS = 20_000
 MAX_HISTORY_CHARS = 12_000
 MAX_CONTEXT_CHARS = 8_000
@@ -16,7 +16,7 @@ MAX_ITEMS = 5
 GATE_THRESHOLD = 0.3
 RELEVANCE_THRESHOLD = 0.7
 SOURCE_LIMITS: dict[SourceKind, int] = {
-    "skill": 18,
+    "skill": 10,
     "metric": 8,
     "certification": 3,
     "relationship": 3,

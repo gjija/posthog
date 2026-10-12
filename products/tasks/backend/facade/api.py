@@ -549,7 +549,6 @@ _TASK_RUN_AGENT_STATE_KEYS = frozenset(
         "initial_prompt_override",
         "store_skills",
         "systemPrompt",
-        "context_selection_eligible",
     }
 )
 
@@ -2620,7 +2619,6 @@ def delete_sandbox_custom_image(image_id: str | UUID, team_id: int, user_id: int
 # These keys are reserved for server-owned run state, never PATCH input.
 _PROTECTED_RUN_STATE_KEYS = frozenset(
     {
-        "context_selection_eligible",
         "run_source",
         "pr_base_branch",
         "stack_base_branch",

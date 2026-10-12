@@ -603,6 +603,7 @@ class TestLLMSkillAPI(APIBaseTest):
 
         assert response.status_code == status.HTTP_200_OK
         results = response.json()["results"]
+        assert all(result["version"] == 1 for result in results)
         assert [result["name"] for result in results] == [
             "needle",
             "needle-name",
@@ -2416,6 +2417,7 @@ class TestSkillAccessControlRBAC(APIBaseTest):
             "results": [
                 {
                     "name": self.skill.name,
+                    "version": self.skill.version,
                     "description": self.skill.description,
                     "score": 240,
                     "matches": [

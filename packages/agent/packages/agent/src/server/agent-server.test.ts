@@ -5554,6 +5554,77 @@ describe("AgentServer HTTP Mode", () => {
       expect(await health.json()).toMatchObject({ hasSession: true });
     });
 
+    it("delivers a startup prompt before a follow-up while context preparation is pending", async () => {
+      const s = createServer();
+      const internals = s as unknown as {
+        posthogAPI: PostHogAPIClient;
+        session: {
+          payload: JwtPayload;
+          clientConnection: { prompt: ReturnType<typeof vi.fn> };
+        };
+        executeCommand(
+          method: string,
+          params: Record<string, unknown>,
+        ): Promise<unknown>;
+      };
+      const idleRun = createTaskRun({ state: { prewarmed: true } });
+      vi.spyOn(internals.posthogAPI, "getTaskRun").mockResolvedValue(idleRun);
+      await s.start();
+      const startupRun = createTaskRun({
+        state: {
+          pending_user_message: "initial question",
+          pending_user_message_ts: "123",
+        },
+      });
+      vi.mocked(internals.posthogAPI.getTaskRun).mockResolvedValue(startupRun);
+      const preparation = Promise.withResolvers<void>();
+      const preparing = Promise.withResolvers<void>();
+      let preparations = 0;
+      mswServer.use(
+        http.post(
+          "http://localhost:8000/api/projects/1/context_layer/selection/prepare/",
+          async () => {
+            if (++preparations === 1) {
+              preparing.resolve();
+              await preparation.promise;
+            }
+            return HttpResponse.json({
+              selection_id: "s",
+              context: "",
+              mode: "control",
+              reason: "control",
+            });
+          },
+        ),
+      );
+      const prompt = vi.fn(async (_request: { prompt: ContentBlock[] }) => ({
+        stopReason: "cancelled" as const,
+      }));
+      internals.session.clientConnection.prompt = prompt;
+      const startup = (
+        s as unknown as StartupTestServer
+      ).sendInitialTaskMessage(internals.session.payload, {
+        taskRun: startupRun,
+        action: "initial",
+      });
+      await preparing.promise;
+      const followup = internals.executeCommand("user_message", {
+        content: "follow-up",
+        messageId: "second-message",
+      });
+      preparation.resolve();
+      await Promise.all([startup, followup]);
+      expect(prompt).toHaveBeenCalledTimes(2);
+      expect(prompt.mock.calls[0][0].prompt).toContainEqual({
+        type: "text",
+        text: "initial question",
+      });
+      expect(prompt.mock.calls[1][0].prompt).toContainEqual({
+        type: "text",
+        text: "follow-up",
+      });
+    });
+
     it.each([
       { resumeKind: "native", activated: false, beforeStartup: false },
       { resumeKind: "native", activated: true, beforeStartup: false },
@@ -5601,7 +5672,6 @@ describe("AgentServer HTTP Mode", () => {
               ? { warm_activated: true }
               : { await_user_message: true }),
             resume_from_run_id: "previous-run",
-            context_selection_eligible: true,
           },
         });
         const internals = s as unknown as {
@@ -6031,112 +6101,142 @@ describe("AgentServer HTTP Mode", () => {
       );
     }, 30000);
 
-    it("hides synthetic resume context while keeping the pending user message visible", async () => {
-      const s = createServer() as unknown as {
-        resumeState: ResumeState | null;
-        session: {
-          payload: JwtPayload;
-          acpSessionId: string;
-          clientConnection: {
-            prompt: ReturnType<typeof vi.fn>;
+    it.each([true, false])(
+      "preserves selection history after a summary resume (human turn: %s)",
+      async (humanTurn) => {
+        const s = createServer() as unknown as {
+          resumeState: ResumeState | null;
+          contextSelection: ContextSelection;
+          session: {
+            payload: JwtPayload;
+            acpSessionId: string;
+            clientConnection: {
+              prompt: ReturnType<typeof vi.fn>;
+            };
+            logWriter: {
+              resetTurnMessages: ReturnType<typeof vi.fn>;
+              appendRawLine: ReturnType<typeof vi.fn>;
+              flushAll: ReturnType<typeof vi.fn>;
+            };
+            sseController: null;
+            deviceInfo: { type: "cloud"; name: string };
+            permissionMode: PermissionMode;
+            hasDesktopConnected: boolean;
           };
-          logWriter: {
-            resetTurnMessages: ReturnType<typeof vi.fn>;
-            appendRawLine: ReturnType<typeof vi.fn>;
-            flushAll: ReturnType<typeof vi.fn>;
-          };
-          sseController: null;
-          deviceInfo: { type: "cloud"; name: string };
-          permissionMode: PermissionMode;
-          hasDesktopConnected: boolean;
+          sendResumeMessage(
+            payload: JwtPayload,
+            taskRun: TaskRun | null,
+          ): Promise<void>;
         };
-        sendResumeMessage(
-          payload: JwtPayload,
-          taskRun: TaskRun | null,
-        ): Promise<void>;
-      };
-      const payload: JwtPayload = {
-        run_id: "test-run-id",
-        task_id: "test-task-id",
-        team_id: 1,
-        user_id: 1,
-        distinct_id: "test-distinct-id",
-        mode: "interactive",
-      };
-      const prompt = vi.fn(async () => ({ stopReason: "cancelled" }));
-      s.session = {
-        payload,
-        acpSessionId: "acp-session",
-        clientConnection: { prompt },
-        logWriter: {
-          resetTurnMessages: vi.fn(),
-          appendRawLine: vi.fn(),
-          flushAll: vi.fn(),
-        },
-        sseController: null,
-        deviceInfo: { type: "cloud", name: "test-sandbox" },
-        permissionMode: "bypassPermissions",
-        hasDesktopConnected: false,
-      };
-      s.resumeState = {
-        conversation: [
-          { role: "user", content: [{ type: "text", text: "old request" }] },
-          {
-            role: "assistant",
-            content: [{ type: "text", text: "old answer" }],
+        const payload: JwtPayload = {
+          run_id: "test-run-id",
+          task_id: "test-task-id",
+          team_id: 1,
+          user_id: 1,
+          distinct_id: "test-distinct-id",
+          mode: "interactive",
+        };
+        const prompt = vi.fn(async () => ({ stopReason: "cancelled" }));
+        s.session = {
+          payload,
+          acpSessionId: "acp-session",
+          clientConnection: { prompt },
+          logWriter: {
+            resetTurnMessages: vi.fn(),
+            appendRawLine: vi.fn(),
+            flushAll: vi.fn(),
           },
-        ],
-        interrupted: false,
-        logEntryCount: 2,
-        sessionId: "prior-session",
-      };
+          sseController: null,
+          deviceInfo: { type: "cloud", name: "test-sandbox" },
+          permissionMode: "bypassPermissions",
+          hasDesktopConnected: false,
+        };
+        s.resumeState = {
+          conversation: [
+            { role: "user", content: [{ type: "text", text: "old request" }] },
+            {
+              role: "assistant",
+              content: [{ type: "text", text: "old answer" }],
+            },
+          ],
+          interrupted: false,
+          logEntryCount: 2,
+          sessionId: "prior-session",
+        };
 
-      const taskRun = createTaskRun({
-        id: "test-run-id",
-        task: "test-task-id",
-        state: {
-          pending_user_message: "visible follow-up",
-          pending_user_message_ts: "123.456",
-        },
-      });
-      vi.spyOn(
-        (
-          s as unknown as {
-            posthogAPI: { getTaskRun: ReturnType<typeof vi.fn> };
-          }
-        ).posthogAPI,
-        "getTaskRun",
-      ).mockResolvedValue(taskRun);
+        const api = {
+          prepareContextSelection: vi.fn().mockResolvedValue({
+            selection_id: "s",
+            context: "",
+            mode: "control",
+            reason: "control",
+          }),
+        };
+        s.contextSelection = new ContextSelection(
+          api as unknown as PostHogAPIClient,
+        );
+        s.contextSelection.enabled = true;
+        const taskRun = createTaskRun({
+          id: "test-run-id",
+          task: "test-task-id",
+          state: humanTurn
+            ? {
+                pending_user_message: "visible follow-up",
+                pending_user_message_ts: "123.456",
+              }
+            : {},
+        });
+        vi.spyOn(
+          (
+            s as unknown as {
+              posthogAPI: { getTaskRun: ReturnType<typeof vi.fn> };
+            }
+          ).posthogAPI,
+          "getTaskRun",
+        ).mockResolvedValue(taskRun);
 
-      await s.sendResumeMessage(payload, taskRun);
+        await s.sendResumeMessage(payload, taskRun);
 
-      const [{ prompt: promptBlocks }] = prompt.mock.calls[0] as unknown as [
-        { prompt: ContentBlock[] },
-      ];
-      const visibleText = promptBlocks
-        .filter(
-          (block) =>
-            block.type === "text" &&
-            !(
-              (block as { _meta?: { ui?: { hidden?: boolean } } })._meta?.ui
-                ?.hidden === true
-            ),
-        )
-        .map((block) => (block as { text: string }).text);
+        const [{ prompt: promptBlocks }] = prompt.mock.calls[0] as unknown as [
+          { prompt: ContentBlock[] },
+        ];
+        const visibleText = promptBlocks
+          .filter(
+            (block) =>
+              block.type === "text" &&
+              !(
+                (block as { _meta?: { ui?: { hidden?: boolean } } })._meta?.ui
+                  ?.hidden === true
+              ),
+          )
+          .map((block) => (block as { text: string }).text);
 
-      expect(promptBlocks[0]).toMatchObject({
-        type: "text",
-        _meta: { ui: { hidden: true } },
-      });
-      expect((promptBlocks[0] as { text: string }).text).toContain(
-        "You are resuming a previous conversation",
-      );
-      expect(visibleText).toEqual(["visible follow-up"]);
-      expect(promptBlocks.at(-1)).toMatchObject({
-        type: "text",
-        _meta: { ui: { hidden: true } },
-      });
-    });
+        expect(promptBlocks[0]).toMatchObject({
+          type: "text",
+          _meta: { ui: { hidden: true } },
+        });
+        expect((promptBlocks[0] as { text: string }).text).toContain(
+          "You are resuming a previous conversation",
+        );
+        expect(visibleText).toEqual(humanTurn ? ["visible follow-up"] : []);
+        await s.contextSelection.dispatch(
+          payload.run_id,
+          "next",
+          [{ type: "text", text: "Does that still apply?" }],
+          prompt,
+        );
+        expect(
+          api.prepareContextSelection.mock.lastCall?.[0].history,
+        ).toContain("old request");
+        expect(
+          api.prepareContextSelection.mock.lastCall?.[0].history,
+        ).toContain("old answer");
+        expect(promptBlocks.at(-1)).toMatchObject({
+          type: "text",
+          _meta: { ui: { hidden: true } },
+        });
+      },
+    );
 
     describe("idle same-run resume", () => {
       type TurnCompleteEvent = {

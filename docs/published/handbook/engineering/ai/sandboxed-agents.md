@@ -685,7 +685,7 @@ or stream echo, and never submits the message again.
 
 ## Context selection experiment
 
-Staff in `CONTEXT_SELECTION_ALLOWED_TEAM_IDS` can receive hidden organizational context on human prompts in web and Slack cloud runs using Claude or Codex.
+The `phai-context-selection` feature flag enables hidden organizational context on human prompts in web and Slack cloud runs using Claude or Codex.
 The `phai-context-selection` flag selects `control`, `shadow`, or `treatment` using the task ID.
 Other flag values disable selection. Local runs, Pi, and other runtime adapters skip it.
 
@@ -693,10 +693,11 @@ Before a human prompt reaches Claude or Codex, the sandbox calls the task-bound 
 Autonomous continuations, steering, and slash commands do not trigger selection.
 
 System One first checks whether organizational context could help, using the request and bounded conversation history.
-When the gate passes, the selector searches current team skills and semantic catalog rows directly, alongside business knowledge hybrid search.
+When the gate passes, the selector calls the existing skill search, catalog list/search, and Business Knowledge search APIs with the sandbox bearer credential.
 There is no separate projection or refresh job. Candidate counts are bounded per source.
-OAuth scopes, current actor permissions, and shared-context access checks constrain retrieval.
-System One reranks candidates concurrently. Sources are checked again before rendering in case definitions or access changed during scoring.
+Each source endpoint enforces its existing OAuth scopes, project restrictions, and actor permissions.
+The selector does not maintain a separate source or conversation-audience permission policy.
+System One reranks the returned candidates concurrently. References describe the source versions retrieved for that turn.
 At most five references and 8,000 characters survive into a hidden context block, identified by `selection_id`.
 Retrieved content is data to verify through existing tools, rather than instructions or approval.
 Skill references contain descriptions, so the prompt requires `skill-get` with the referenced name and version before the agent relies on or follows a skill.
@@ -707,12 +708,15 @@ It can cite the underlying sources and explain verification failures, but must n
 
 Control skips retrieval. Shadow records the selected bundle without injecting it. Treatment injects the bundle.
 Selection has a three-second budget by default. Saturation, timeout, and selection failures leave the ordinary prompt flow available.
-Business Knowledge retrieval uses at most half the budget remaining after local retrieval, leaving time to score ready skills and catalog sources.
-Knowledge candidates are ranked anchor passages, without neighbor expansion, and child environments use the canonical project's knowledge and permissions.
-Skill access filtering happens before the retrieval limit. Catalog selection skips projects with customized warehouse access and checks system-table denials without building the full catalog.
-The agent validates the context budget in Unicode code points, matching the backend renderer.
+Source requests run concurrently and use at most half the remaining budget, leaving time to score ready results.
+A denied, failed, or slow source does not suppress results from other sources.
+Reranking reserves time to pack completed scores even if another scorer times out.
+Source lookup uses the current project endpoint; the selector does not expand the credential to a parent project.
+The agent truncates requests and history and validates the context budget in Unicode code points, matching the backend renderer.
 Native and summary resumes preserve bounded prior conversation history for later turns; a successful `/clear` resets selection history.
-Actor refreshes update the selection credential, and cancellation during preparation prevents the prepared prompt from reaching the model.
+Actor refreshes update the selection credential. Flag eligibility is checked on each human turn.
+Startup preparation shares the message-delivery queue with follow-ups, preserving prompt order.
+Cancellation during preparation prevents the prepared prompt from reaching the model.
 Selection spans retain scorer error types and candidate identifiers for failed gate or relevance calls.
 
 A best-effort `Context selection` LLM span records the outcome, scores, retrieval time, and exact bounded bundle.

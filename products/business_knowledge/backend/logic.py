@@ -2481,7 +2481,6 @@ def search_knowledge(
     limit: int = 10,
     use_semantic: bool = False,
     query_embedding: list[float] | None = None,
-    expand_neighbors: bool = True,
 ) -> list[KnowledgeSearchResult]:
     """
     Hybrid (lexical + semantic) relevance search over BK chunks.
@@ -2542,15 +2541,6 @@ def search_knowledge(
     else:
         return []
 
-    if not expand_neighbors:
-        chunks_by_id = {
-            chunk.id: chunk
-            for chunk in _safe_chunks_qs(team_id)
-            .filter(id__in=[anchor.id for anchor in anchor_chunks])
-            .select_related("source", "document")
-        }
-        return [_result_from_chunk(chunks_by_id[anchor.id]) for anchor in anchor_chunks if anchor.id in chunks_by_id]
-
     # --- Ordinal neighbour expansion ---
     doc_rank: dict[UUID, int] = {}
     wanted_ordinals: dict[UUID, set[int]] = {}
@@ -2594,7 +2584,6 @@ def search_knowledge_for_team(
     query: str,
     *,
     limit: int = 10,
-    expand_neighbors: bool = True,
 ) -> list[KnowledgeSearchResult]:
     """
     Sync orchestration of hybrid BK search: embed the query, then call
@@ -2610,14 +2599,7 @@ def search_knowledge_for_team(
         ).embedding
     except Exception:
         logger.warning("bk_query_embedding_failed", team_id=team.id, exc_info=True)
-    return search_knowledge(
-        team.id,
-        query,
-        limit=limit,
-        use_semantic=embedding is not None,
-        query_embedding=embedding,
-        expand_neighbors=expand_neighbors,
-    )
+    return search_knowledge(team.id, query, limit=limit, use_semantic=embedding is not None, query_embedding=embedding)
 
 
 async def async_search_knowledge_for_team(

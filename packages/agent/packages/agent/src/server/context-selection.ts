@@ -18,6 +18,10 @@ function text(prompt: ContentBlock[]): string {
     .join("\n");
 }
 
+function tail(value: string, limit: number): string {
+  return Array.from(value).slice(-limit).join("");
+}
+
 /** One instance per cloud process. Only actual human turns prepare context. */
 export class ContextSelection {
   enabled = false;
@@ -35,7 +39,7 @@ export class ContextSelection {
 
   resetHistory(runId: string, history = ""): void {
     this.historyRunId = runId;
-    this.history = history.slice(-12_000);
+    this.history = tail(history, 12_000);
     this.historySource = "resume_prompt";
   }
 
@@ -74,14 +78,14 @@ export class ContextSelection {
     if (this.historyRunId !== runId) {
       this.resetHistory(runId);
     }
-    if (!this.history) this.history = restoredHistory.slice(-12_000);
+    if (!this.history) this.history = tail(restoredHistory, 12_000);
     const history = this.history;
     try {
       prepared = await this.api.prepareContextSelection({
         run_id: runId,
         message_id: messageId,
-        prompt: userText.slice(-20_000),
-        prompt_char_count: userText.length,
+        prompt: tail(userText, 20_000),
+        prompt_char_count: Array.from(userText).length,
         history,
         history_source: this.historySource,
         runtime_version: this.runtimeVersion,
@@ -100,12 +104,12 @@ export class ContextSelection {
 
   private recordUser(runId: string, text: string): void {
     if (!this.enabled || this.historyRunId !== runId) return;
-    this.history = `${this.history}\nUser: ${text}`.slice(-12_000);
+    this.history = tail(`${this.history}\nUser: ${text}`, 12_000);
     this.historySource = "runtime";
   }
 
   recordAssistant(runId: string, text: string): void {
     if (!this.enabled || this.historyRunId !== runId) return;
-    this.history = `${this.history}\nAssistant: ${text}`.slice(-12_000);
+    this.history = tail(`${this.history}\nAssistant: ${text}`, 12_000);
   }
 }

@@ -957,6 +957,7 @@ class LLMSkillViewSet(
                     results.append(
                         {
                             "name": skill.name,
+                            "version": skill.version,
                             "description": skill.description,
                             "score": cast(_ScoredSkill, skill).search_score,
                             "matches": self._get_search_matches(skill, query),

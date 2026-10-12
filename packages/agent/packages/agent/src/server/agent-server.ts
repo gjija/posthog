@@ -3072,8 +3072,7 @@ export class AgentServer {
         "Could not load task run to determine its initial prompt",
       );
     }
-    this.contextSelection.enabled =
-      taskRun.state.context_selection_eligible === true;
+    this.contextSelection.enabled = true;
     const taskRunState = taskRun.state;
     const prewarmed = taskRunState.prewarmed === true;
     const sameRunResume =
@@ -3127,6 +3126,21 @@ export class AgentServer {
   }
 
   private async sendInitialTaskMessage(
+    payload: JwtPayload,
+    prepared: PreparedInitialTaskMessage,
+  ): Promise<void> {
+    if (prepared.action === "wait" || prepared.action === "idle") {
+      return this.sendInitialTaskMessageInOrder(payload, prepared);
+    }
+    const release = await this.acquireNonSteerDeliveryTurn();
+    try {
+      await this.sendInitialTaskMessageInOrder(payload, prepared);
+    } finally {
+      release();
+    }
+  }
+
+  private async sendInitialTaskMessageInOrder(
     payload: JwtPayload,
     { taskRun, action }: PreparedInitialTaskMessage,
   ): Promise<void> {
@@ -3265,6 +3279,10 @@ export class AgentServer {
   ): Promise<boolean> {
     if (!this.session || !this.resumeState) return false;
     const resumeState = this.resumeState;
+    this.contextSelection.resetHistory(
+      payload.run_id,
+      formatConversationForResume(resumeState.conversation),
+    );
     return await this.runStartupTurn(() =>
       this.runResumeTurn(
         payload,

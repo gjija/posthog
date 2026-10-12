@@ -7,17 +7,14 @@ from typing import cast
 
 from django.db import connections
 
-from rest_framework.exceptions import APIException
-
 from posthog.models.scoping import team_scope
 
 _EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="context-request")
 _CAPACITY = BoundedSemaphore(4)
 
 
-class SelectionUnavailable(APIException):
-    status_code = 503
-    default_detail = "Context selection is busy or exceeded its request deadline."
+class SelectionUnavailable(RuntimeError):
+    pass
 
 
 def bounded_request[T](team_id: int, seconds: float, operation: Callable[[float], T]) -> T:

@@ -235,6 +235,7 @@ class LLMSkillSearchMatchSerializer(serializers.Serializer):
 
 
 class LLMSkillSearchResultSerializer(serializers.Serializer):
+    version = serializers.IntegerField(min_value=1, help_text="Published version matched by this search result.")
     name = serializers.CharField(help_text="Unique skill name.")
     description = serializers.CharField(help_text="What this skill does and when to use it.")
     score = serializers.IntegerField(
