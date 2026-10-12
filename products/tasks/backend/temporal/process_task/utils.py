@@ -892,15 +892,17 @@ def _private_repositories(repositories: Sequence[str]) -> list[str]:
 
 def _installation_repository_names(github_integration: GitHubIntegrationBase, repositories: Sequence[str]) -> list[str]:
     # GitHub scopes a mint by bare repo name, so a repo another account owns would get the installation's
-    # repo of the same name. A placeholder account name cannot be checked, so it skips the owner match.
+    # repo of the same name. Do not mint until the installation owner is known.
     owner = None if github_integration.account_name_needs_heal() else github_integration.organization().lower()
-    if owner is not None and any(repository.lower().rpartition("/")[0] != owner for repository in repositories):
+    if owner is None or any(repository.lower().rpartition("/")[0] != owner for repository in repositories):
         github_integration.ensure_account_name(force_refresh=True)
+        if github_integration.account_name_needs_heal():
+            return []
         owner = github_integration.organization().lower()
     names: set[str] = set()
     for repository in repositories:
         repository_owner, _, name = repository.lower().rpartition("/")
-        if owner is None or repository_owner == owner:
+        if repository_owner == owner:
             names.add(name)
     return sorted(names)
 

@@ -842,11 +842,15 @@ class TestGetGithubToken(TestCase):
             ("public_bootstrap_only_keeps_shared_token", "Acme", ["PostHog/.github"], None, "ghs_shared"),
             ("drops_repo_another_account_owns", "Acme", ["acme/web", "evilorg/api"], ["web"], "ghs_scoped"),
             ("another_account_only_gets_no_token", "Acme", ["evilorg/api"], None, None),
-            ("placeholder_account_skips_owner_match", "INSTALL", ["evilorg/api"], ["api"], "ghs_scoped"),
+            ("placeholder_account_rejects_other_owner", "INSTALL", ["evilorg/api"], None, None),
+            ("placeholder_account_heals", "INSTALL", ["acme/api"], ["api"], "ghs_scoped"),
+            ("missing_account_heals", None, ["acme/api"], ["api"], "ghs_scoped"),
+            ("placeholder_heal_fails", "INSTALL", ["evilorg/api"], None, None, 500),
+            ("missing_heal_fails", None, ["acme/api"], None, None, 500),
         ]
     )
     def test_repositories_get_a_cached_scoped_token_instead_of_the_shared_one(
-        self, _name, account_name, repositories, expected_mint_repositories, expected_token
+        self, _name, account_name, repositories, expected_mint_repositories, expected_token, lookup_status=200
     ):
         from posthog.models import Integration, Organization, Team
         from posthog.models.integration import GitHubIntegration
@@ -871,13 +875,13 @@ class TestGetGithubToken(TestCase):
                 GitHubIntegration,
                 "client_request",
                 return_value=MagicMock(
-                    status_code=200, json=lambda: {"account": {"login": "Acme", "type": "Organization"}}
+                    status_code=lookup_status, json=lambda: {"account": {"login": "Acme", "type": "Organization"}}
                 ),
             ) as lookup,
         ):
             tokens = [get_github_token(integration.id, repositories=repositories) for _ in range(2)]
 
-        if account_name == "OldAcme" or (
+        if account_name in ("OldAcme", "INSTALL", None) or (
             account_name == "Acme" and any(r.startswith("evilorg/") for r in repositories)
         ):
             lookup.assert_called_once_with("installations/INSTALL")
