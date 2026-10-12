@@ -277,6 +277,15 @@ function reportAgeHours(report: Pick<SignalReport, 'created_at'>): number {
     return Math.max(0, Math.round(hours * 10) / 10)
 }
 
+// The ranker that ordered the list in view, from the latest list response. Report actions and
+// sort changes read it, so the ranking test can join them to the ranker without each caller passing it.
+let servedInboxRankerId: string | null = null
+
+/** Record the ranker of the latest list response. Null when the sort is not Recommended. */
+export function setInboxServedRanker(rankerId: string | null): void {
+    servedInboxRankerId = rankerId
+}
+
 interface BaseReportProperties {
     report_id: string
     report_age_hours: number
@@ -433,6 +442,8 @@ export function captureInboxReportsImpressed(params: {
     sortField: string
     sortDirection: string
     createdWindow: string | null
+    /** The ranker the server used for a Recommended list. Null for other sorts. */
+    rankerId: string | null
 }): void {
     const rankingSort = params.sortField.startsWith('ranking_')
     captureInboxEvent(INBOX_EVENTS.REPORTS_IMPRESSED, {
@@ -444,6 +455,7 @@ export function captureInboxReportsImpressed(params: {
         sort_field: params.sortField,
         sort_direction: params.sortDirection,
         created_window: params.createdWindow,
+        ranker_id: params.rankerId,
         impression_count: params.reports.length,
         impressions: params.reports.map((report, index) => ({
             ...baseReportProperties(report),
@@ -472,6 +484,8 @@ export function captureInboxReportOpened(
         rank: number | null
         listSize: number | null
         section: InboxReportSectionKey | null
+        /** The ranker of the list the report was opened from. Null for other sorts and for a cold deep-link. */
+        rankerId: string | null
     },
     /** The unload flush passes `{ send_instantly: true }` so the open leaves before the page does. */
     options?: CaptureOptions
@@ -488,6 +502,7 @@ export function captureInboxReportOpened(
             rank: params.rank,
             list_size: params.listSize,
             section: params.section,
+            ranker_id: params.rankerId,
         },
         options
     )
@@ -551,6 +566,7 @@ export function captureInboxReportAction(params: {
         surface: params.surface,
         is_bulk: params.isBulk ?? false,
         bulk_size: params.bulkSize ?? 1,
+        ranker_id: servedInboxRankerId,
         ...params.extra,
     })
 }
@@ -892,6 +908,8 @@ export function captureInboxQueryChanged(params: {
         search_length: search.length,
         has_active_filters: params.hasActiveFilters,
         created_window: params.createdWindow,
+        // The ranker of the list the user changed away from, not of the list the change requests.
+        ranker_id: servedInboxRankerId,
     })
 }
 
