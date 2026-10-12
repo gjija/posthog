@@ -1069,6 +1069,7 @@ describe('Tool Filtering - Feature Flags', () => {
             'scouts-tool-access',
             'replay-vision-scanner-dashboard',
             'metrics-dashboard-import',
+            'insight-data-checks',
         ]
         expect(allFlags).toEqual(expect.arrayContaining(branchFlags))
         // The flags branches add are asserted on the line above and held out of the list and
