@@ -13,6 +13,7 @@ from posthog.models.health_issue import HealthIssue
 from products.experiments.backend.health.checks.flag_state import flag_state
 from products.experiments.backend.models.experiment import Experiment
 from products.experiments.backend.temporal.health_checks.findings import detect_experiment_findings
+from products.experiments.backend.temporal.health_checks.no_metric import ExperimentNoMetricCheck
 from products.feature_flags.backend.models.feature_flag import FeatureFlag
 
 METRIC = {"kind": "ExperimentMetric", "metric_type": "mean", "source": {"kind": "EventsNode", "event": "$pageview"}}
@@ -77,3 +78,19 @@ class TestExperimentHealthFindings(BaseTest):
         self._experiment(team=other_team, flag_active=False)
 
         assert detect_experiment_findings([self.team.id], flag_state) == {}
+
+    @parameterized.expand(
+        [
+            ("running", {}, True),
+            ("draft", {"start_date": None}, False),
+            ("ended", {"end_date": timezone.now() - timedelta(days=1)}, False),
+        ]
+    )
+    def test_no_metric_reports_running_experiments_only(
+        self, _name: str, fields: dict[str, Any], expect_issue: bool
+    ) -> None:
+        self._experiment(metrics=[], **fields)
+
+        results = ExperimentNoMetricCheck().detect([self.team.id])
+
+        assert (self.team.id in results) is expect_issue
