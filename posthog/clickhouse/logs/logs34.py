@@ -431,6 +431,69 @@ AS {LOGS34_TO_VOLUME_BUCKETS_MV_SELECT()}
 """
 
 
+def LOGS34_TO_PATTERN_BUCKETS_MV():
+    db = settings.CLICKHOUSE_LOGS_CLUSTER_DATABASE
+    # Dimensions and the 300s grid match LOGS34_TO_VOLUME_BUCKETS_MV_SELECT, so the
+    # two rollups stay comparable series by series.
+    #
+    # `pattern_version = 0` marks a row the ingestion consumer never stamped. Those
+    # rows would all collapse into one empty-pattern bucket per series, so they are
+    # dropped here. logs_volume_buckets still counts them. The filter is on the
+    # version, not on `pattern != ''`, because a stamped empty body also yields an
+    # empty pattern, and that is a real shape.
+    return f"""
+CREATE MATERIALIZED VIEW IF NOT EXISTS {db}.logs34_to_pattern_buckets TO {db}.logs_pattern_buckets
+(
+    `team_id` Int32,
+    `time_bucket` DateTime('UTC'),
+    `service_name` LowCardinality(String),
+    `namespace` LowCardinality(String),
+    `environment` LowCardinality(String),
+    `severity_text` LowCardinality(String),
+    `pattern_version` UInt8,
+    `pattern` String,
+    `log_count` SimpleAggregateFunction(sum, UInt64)
+)
+AS SELECT
+    team_id,
+    time_bucket,
+    service_name,
+    namespace,
+    environment,
+    severity_text,
+    pattern_version,
+    pattern,
+    sumSimpleState(1) AS log_count
+FROM
+(
+    SELECT
+        team_id,
+        toStartOfInterval(timestamp, toIntervalSecond(300), 'UTC') AS time_bucket,
+        service_name,
+        if(
+            resource_attributes['k8s.namespace.name'] != '',
+            resource_attributes['k8s.namespace.name'],
+            resource_attributes['service.namespace']
+        ) AS namespace,
+        if(
+            resource_attributes['deployment.environment.name'] != '',
+            resource_attributes['deployment.environment.name'],
+            if(
+                resource_attributes['deployment.environment'] != '',
+                resource_attributes['deployment.environment'],
+                resource_attributes['env']
+            )
+        ) AS environment,
+        lower(severity_text) AS severity_text,
+        pattern_version,
+        pattern
+    FROM {db}.{TABLE_NAME}
+    WHERE pattern_version != 0
+)
+GROUP BY team_id, time_bucket, service_name, namespace, environment, severity_text, pattern_version, pattern
+"""
+
+
 def KAFKA_LOGS_AVRO_KAFKA_METRICS_MV():
     db = settings.CLICKHOUSE_LOGS_CLUSTER_DATABASE
     return f"""
