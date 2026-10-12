@@ -1,6 +1,8 @@
 from dataclasses import asdict
 from uuid import UUID
 
+from django.db import models
+
 from drf_spectacular.utils import extend_schema
 from rest_framework import serializers, viewsets
 from rest_framework.authentication import get_authorization_header
@@ -23,6 +25,18 @@ class SelectionUnavailable(APIException):
     default_detail = "Context selection is busy or exceeded its request deadline."
 
 
+class SelectionHistorySource(models.TextChoices):
+    RUNTIME = "runtime"
+    RESUME_PROMPT = "resume_prompt"
+
+
+class SelectionMode(models.TextChoices):
+    DISABLED = "disabled"
+    CONTROL = "control"
+    SHADOW = "shadow"
+    TREATMENT = "treatment"
+
+
 class PrepareSerializer(serializers.Serializer):
     runtime_version = serializers.CharField(
         max_length=128, required=False, help_text="Cloud agent build version, or unknown."
@@ -31,7 +45,7 @@ class PrepareSerializer(serializers.Serializer):
         min_value=0, required=False, help_text="Original request length before truncation."
     )
     history_source = serializers.ChoiceField(
-        choices=["runtime", "resume_prompt"], required=False, help_text="Origin of the bounded conversation context."
+        choices=SelectionHistorySource.choices, required=False, help_text="Origin of the bounded conversation context."
     )
     run_id = serializers.UUIDField(help_text="Cloud run receiving this human message.")
     message_id = serializers.CharField(max_length=128, help_text="Stable user-message identifier, reused on retries.")
@@ -53,9 +67,7 @@ class PrepareSerializer(serializers.Serializer):
 class PreparedContextSerializer(serializers.Serializer):
     selection_id = serializers.CharField(allow_blank=True, help_text="Selection trace identifier.")
     context = serializers.CharField(allow_blank=True, help_text="Bounded hidden context for a treatment prompt.")  # type: ignore[assignment]
-    mode = serializers.ChoiceField(
-        choices=["disabled", "control", "shadow", "treatment"], help_text="Feature flag variant."
-    )
+    mode = serializers.ChoiceField(choices=SelectionMode.choices, help_text="Feature flag variant.")
     reason = serializers.CharField(help_text="Selection outcome.")
 
 

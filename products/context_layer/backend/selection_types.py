@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     from posthog.llm.system_one import JsonValue
 
 SourceKind = Literal["skill", "metric", "certification", "relationship", "business_knowledge"]
-CONFIG_VERSION = "context-selection-v6"
+CONFIG_VERSION = "context-selection-v7"
 MAX_PROMPT_CHARS = 20_000
 MAX_HISTORY_CHARS = 12_000
 MAX_CONTEXT_CHARS = 8_000
