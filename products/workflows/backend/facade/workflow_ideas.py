@@ -5,6 +5,7 @@ from products.workflows.backend.services.workflow_idea_drafts import (
     build_idea_definition,
     find_site_url,
     new_idea_from_draft,
+    people_reached_since,
 )
 from products.workflows.backend.services.workflow_ideas import (
     accept_idea,
@@ -24,4 +25,5 @@ __all__ = [
     "list_open_ideas",
     "mark_viewed",
     "new_idea_from_draft",
+    "people_reached_since",
 ]
