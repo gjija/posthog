@@ -1,5 +1,5 @@
 // Auto-generated from OpenRouter API - Do not edit manually
-// Generated at: 2026-10-08 10:06:25 UTC
+// Generated at: 2026-10-12 20:02:47 UTC
 
 export type CanonicalProvider =
     | 'default'
@@ -10,7 +10,7 @@ export type CanonicalProvider =
     | 'alibaba'
     | 'alibaba-fast'
     | 'alibaba-fp8'
-    | 'alibaba-opensource'
+    | 'alibaba-us-east-1'
     | 'amazon-bedrock'
     | 'amazon-bedrock-eu-west-1'
     | 'amazon-bedrock-global'
@@ -52,6 +52,7 @@ export type CanonicalProvider =
     | 'coreweave-nvfp4'
     | 'crusoe-bf16'
     | 'crusoe-fp4'
+    | 'crusoe-fp8'
     | 'darkbloom'
     | 'darkbloom-fp4'
     | 'darkbloom-fp8'
@@ -137,10 +138,10 @@ export type CanonicalProvider =
     | 'nex-agi-bf16'
     | 'nex-agi-fp8'
     | 'nextbit-bf16'
+    | 'nextbit-fp8'
     | 'nextbit-int4'
     | 'novita'
     | 'novita-bf16'
-    | 'novita-fp16'
     | 'novita-fp4'
     | 'novita-fp8'
     | 'novita-int4'
@@ -167,6 +168,7 @@ export type CanonicalProvider =
     | 'poolside-fp8'
     | 'primeintellect'
     | 'reka'
+    | 'reka-fp8'
     | 'relace'
     | 'relace-bf16'
     | 'relace-fp4'
@@ -185,6 +187,7 @@ export type CanonicalProvider =
     | 'streamlake'
     | 'streamlake-fp8'
     | 'tencent-fp8'
+    | 'tenstorrent-fp4'
     | 'tenstorrent-fp8'
     | 'thinkingmachines-nvfp4'
     | 'together'
