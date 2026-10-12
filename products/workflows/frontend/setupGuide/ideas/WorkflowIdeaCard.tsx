@@ -17,13 +17,6 @@ import { WorkflowIdeaFacts } from './WorkflowIdeaFacts'
 import { WorkflowIdeaImpact } from './WorkflowIdeaImpact'
 import { workflowIdeasLogic } from './workflowIdeasLogic'
 
-const TIER_LABEL: Record<string, string> = {
-    revenue: 'Revenue',
-    activation: 'Activation',
-    retention: 'Retention',
-    engagement: 'Engagement',
-}
-
 /** A workflow PostHog drafted for the project, with what it does, what it is worth and the steps to use it. */
 export function WorkflowIdeaCard({
     idea,
@@ -76,7 +69,6 @@ export function WorkflowIdeaCard({
                 <LemonTag type="highlight" icon={<IconSparkles />}>
                     Drafted by PostHog
                 </LemonTag>
-                <LemonTag type="muted">{TIER_LABEL[idea.value_tier] ?? idea.value_tier}</LemonTag>
                 {recommended && <LemonTag type="success">Start here</LemonTag>}
             </div>
             <div className="flex flex-col gap-1">
