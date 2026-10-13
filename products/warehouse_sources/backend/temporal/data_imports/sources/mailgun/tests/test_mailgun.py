@@ -22,11 +22,14 @@ from products.warehouse_sources.backend.temporal.data_imports.sources.generated_
 )
 from products.warehouse_sources.backend.temporal.data_imports.sources.mailgun import mailgun as mailgun_module
 from products.warehouse_sources.backend.temporal.data_imports.sources.mailgun.mailgun import (
+    EVENTS_CONSISTENCY_LAG_SECONDS,
+    EVENTS_LOOKBACK_DAYS,
     FORBIDDEN_ERROR,
     INVALID_KEY_ERROR,
     LOGS_LOOKBACK_DAYS,
     METRICS_PAGE_SIZE,
     UNREACHABLE_ERROR,
+    MailgunAllDomainsSkippedError,
     MailgunResumeConfig,
     MailgunRetryableError,
     _epoch_to_datetime,
@@ -152,6 +155,25 @@ class TestInitialUrl:
     def test_domain_scoped_endpoint_without_domain_raises(self):
         with pytest.raises(ValueError):
             _initial_url(US_BASE, MAILGUN_ENDPOINTS["events"], None)
+
+    @pytest.mark.parametrize(
+        "watermark_seconds_ago, expected_begin_seconds_ago",
+        [
+            (None, EVENTS_LOOKBACK_DAYS * 24 * 60 * 60),
+            (3 * 60 * 60, 3 * 60 * 60),
+        ],
+    )
+    def test_events_query_always_sends_an_ascending_time_range(self, watermark_seconds_ago, expected_begin_seconds_ago):
+        now = 1_800_000_000
+        begin = None if watermark_seconds_ago is None else now - watermark_seconds_ago
+        with mock.patch.object(mailgun_module.time, "time", return_value=now):
+            url = _initial_url(US_BASE, MAILGUN_ENDPOINTS["events"], "example.com", begin)
+
+        assert url is not None
+        query = _query(url)
+        assert query["ascending"] == ["yes"]
+        assert query["begin"] == [str(now - expected_begin_seconds_ago)]
+        assert query["end"] == [str(now - EVENTS_CONSISTENCY_LAG_SECONDS)]
 
 
 class TestNormalizeRow:
@@ -338,6 +360,18 @@ class TestGetRows:
         assert saved_states[0].current_domain is None
         assert saved_states[-1].next_url is None
         assert saved_states[-1].pending_domains == []
+
+    @mock.patch("products.warehouse_sources.backend.temporal.data_imports.sources.mailgun.mailgun.make_tracked_session")
+    def test_every_domain_skipped_fails_the_sync(self, mock_session):
+        domains_page = {"items": [{"name": "a.com"}, {"name": "b.com"}]}
+        mock_session.return_value.get.side_effect = [
+            _response(domains_page),
+            _error_response(400, f"{US_BASE}/v3/a.com/events"),
+            _error_response(400, f"{US_BASE}/v3/b.com/events"),
+        ]
+
+        with pytest.raises(MailgunAllDomainsSkippedError, match="every sending domain"):
+            list(get_rows("key", "us", "events", mock.MagicMock(), _make_manager()))
 
     @mock.patch("products.warehouse_sources.backend.temporal.data_imports.sources.mailgun.mailgun.make_tracked_session")
     def test_domain_listing_401_still_raises(self, mock_session):
