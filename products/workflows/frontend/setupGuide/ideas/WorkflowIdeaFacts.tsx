@@ -1,13 +1,10 @@
-import { IconLetter } from '@posthog/icons'
+import { humanFriendlyNumber } from 'lib/utils/numbers'
+import { pluralize } from 'lib/utils/strings'
 
 import type { WorkflowIdeaApi } from '../../generated/api.schemas'
-import { waitLabel } from './ideaCopy'
+import { estimatedMonthlyCost, waitLabel } from './ideaCopy'
 
-function capitalize(text: string): string {
-    return text.charAt(0).toUpperCase() + text.slice(1)
-}
-
-/** Who enters an idea's workflow, what it sends and when it stops. */
+/** What an idea's workflow does in full: its trigger, schedule, exit, entry limit and email volume. */
 export function WorkflowIdeaFacts({
     evidence,
     emailCount,
@@ -20,20 +17,21 @@ export function WorkflowIdeaFacts({
         waits.length === emailCount && waits.length > 0
             ? `, ${waits.map((wait, index) => (index === 0 ? `${waitLabel(wait)} later` : `then ${waitLabel(wait)} after that`)).join(', ')}`
             : ''
+    const emailsPerMonth = evidence.emails_per_month ?? 0
+    const cost = estimatedMonthlyCost(emailsPerMonth)
 
     return (
         <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
             <dt className="text-secondary">Starts</dt>
             <dd className="m-0">
-                {evidence.audience ? capitalize(evidence.audience) : 'On'}{' '}
-                <code className="text-xs text-secondary" translate="no">
+                When someone sends{' '}
+                <code className="text-xs" translate="no">
                     {evidence.trigger_event}
                 </code>
             </dd>
             <dt className="text-secondary">Sends</dt>
-            <dd className="m-0 flex flex-wrap items-center gap-1">
-                <IconLetter className="text-secondary" />
-                {emailCount === 1 ? '1 email' : `${emailCount} emails`}
+            <dd className="m-0">
+                {pluralize(emailCount, 'email')}
                 {schedule}
             </dd>
             {evidence.goal && (
@@ -46,6 +44,15 @@ export function WorkflowIdeaFacts({
                 <>
                     <dt className="text-secondary">Limit</dt>
                     <dd className="m-0">Once per person every {evidence.once_per_person_days} days</dd>
+                </>
+            ) : null}
+            {emailsPerMonth ? (
+                <>
+                    <dt className="text-secondary">Volume</dt>
+                    <dd className="m-0">
+                        About {humanFriendlyNumber(emailsPerMonth)} emails a month,{' '}
+                        {cost > 0 ? `roughly $${humanFriendlyNumber(cost)} a month` : 'within the free monthly emails'}
+                    </dd>
                 </>
             ) : null}
         </dl>

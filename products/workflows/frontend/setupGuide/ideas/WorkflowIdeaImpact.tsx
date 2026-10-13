@@ -1,41 +1,31 @@
 import { humanFriendlyNumber } from 'lib/utils/numbers'
-import { pluralize } from 'lib/utils/strings'
 
 import type { WorkflowIdeaApi } from '../../generated/api.schemas'
-import { EXAMPLE_LIFT, estimatedMonthlyCost, exampleExtraPerMonth } from './ideaCopy'
+import { EXAMPLE_LIFT, exampleExtraPerMonth } from './ideaCopy'
 
-/** How many people an idea reaches, what a small lift would be worth, and what its emails cost. */
+/** Who an idea's workflow would reach each month, and what a small lift would be worth. */
 export function WorkflowIdeaImpact({ evidence }: { evidence: WorkflowIdeaApi['evidence'] }): JSX.Element {
     const extra = exampleExtraPerMonth(evidence)
-    const cost = estimatedMonthlyCost(evidence.emails_per_month ?? 0)
+    const goal = evidence.goal ?? 'reach the goal'
     return (
-        <div className="flex flex-col gap-1 rounded border bg-surface-secondary p-2 text-sm">
+        <div className="flex flex-col gap-0.5 text-sm" data-attr="workflow-idea-impact">
             <span>
-                <strong translate="no">{humanFriendlyNumber(evidence.reachable_people)}</strong>{' '}
+                <strong className="text-base" translate="no">
+                    {humanFriendlyNumber(evidence.reachable_people)}
+                </strong>{' '}
                 {evidence.reachable_people === 1
-                    ? `person a month doesn't ${evidence.goal ?? 'reach the goal'}`
-                    : `${evidence.audience ?? 'people'} a month don't ${evidence.goal ?? 'reach the goal'}`}{' '}
-                within a week
-                {evidence.baseline_rate !== null && ` (${Math.round(evidence.baseline_rate * 100)}% do today)`}.
+                    ? `person doesn't ${goal} each month`
+                    : `${evidence.audience ?? 'people'} don't ${goal} each month`}
             </span>
             {!!extra && evidence.goal_unit && (
                 <span className="text-secondary">
-                    For example, if {Math.round(EXAMPLE_LIFT * 100)} in 100 of them {evidence.goal} after these emails,
-                    that's about{' '}
-                    <strong className="text-primary">
+                    About{' '}
+                    <strong className="text-success">
                         {humanFriendlyNumber(extra)} more {evidence.goal_unit}
                     </strong>{' '}
-                    a month. Once it runs, PostHog shows the real number.
+                    a month <span className="whitespace-nowrap">if {Math.round(EXAMPLE_LIFT * 100)} in 100 do</span>
                 </span>
             )}
-            {evidence.emails_per_month ? (
-                <span className="text-xs text-secondary">
-                    About {pluralize(evidence.emails_per_month, 'email')} a month at today's volume,{' '}
-                    {cost > 0
-                        ? `roughly $${humanFriendlyNumber(cost)} a month on its own.`
-                        : 'within the free emails each month on its own.'}
-                </span>
-            ) : null}
         </div>
     )
 }

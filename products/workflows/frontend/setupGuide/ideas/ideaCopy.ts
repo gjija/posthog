@@ -48,17 +48,6 @@ export function exampleExtraPerMonth(evidence: WorkflowIdeaApi['evidence']): num
     return Math.round(evidence.reachable_people * EXAMPLE_LIFT)
 }
 
-export function siteHost(siteUrl: string | null | undefined): string | null {
-    if (!siteUrl) {
-        return null
-    }
-    try {
-        return new URL(siteUrl).host
-    } catch {
-        return siteUrl
-    }
-}
-
 // Matches SITE_PLACEHOLDER in the backend draft builder.
 export const SITE_PLACEHOLDER = 'https://your-website.example'
 

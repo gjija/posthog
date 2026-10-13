@@ -1,3 +1,4 @@
+import clsx from 'clsx'
 import { useValues } from 'kea'
 
 import { IconSparkles } from '@posthog/icons'
@@ -20,9 +21,9 @@ function WorkflowIdeasSection(): JSX.Element | null {
 
     if (ideas === null && ideasLoading) {
         return (
-            <div className="grid grid-cols-1 gap-3 @3xl:grid-cols-2 @6xl:grid-cols-3">
+            <div className="grid grid-cols-1 gap-3 @4xl:grid-cols-3">
                 {[0, 1, 2].map((index) => (
-                    <LemonSkeleton key={index} className="h-48 rounded" />
+                    <LemonSkeleton key={index} className="h-36 rounded" />
                 ))}
             </div>
         )
@@ -30,6 +31,8 @@ function WorkflowIdeasSection(): JSX.Element | null {
     if (!ideas?.length) {
         return null
     }
+    // Three ideas at most, so the row never wraps. Using or dismissing one brings in the next.
+    const suggested = ideas.filter((idea) => idea.status === 'suggested').slice(0, 3)
 
     return (
         <section
@@ -38,7 +41,7 @@ function WorkflowIdeasSection(): JSX.Element | null {
             data-attr="workflow-ideas"
         >
             <div className="flex items-start gap-2">
-                <IconSparkles className="mt-0.5 size-5 text-accent" />
+                <IconSparkles className="mt-0.5 size-5 shrink-0 text-accent" />
                 <div className="flex flex-col">
                     <h3 className="mb-0 text-base font-semibold">Workflows drafted for you</h3>
                     <span className="text-xs text-secondary">
@@ -46,12 +49,25 @@ function WorkflowIdeasSection(): JSX.Element | null {
                     </span>
                 </div>
             </div>
-            <div className="grid grid-cols-1 gap-3 @3xl:grid-cols-2 @6xl:grid-cols-3">
-                {ideas.map((idea, index) => (
-                    // The list puts the project's best first bet at the top.
-                    <WorkflowIdeaCard key={idea.id} idea={idea} recommended={index === 0} />
-                ))}
-            </div>
+            {suggested.length > 0 && (
+                <div
+                    className={clsx(
+                        'grid grid-cols-1 gap-3',
+                        // Columns only once every card fits on one row, so a third card never sits alone on a row.
+                        suggested.length === 2 && '@2xl:grid-cols-2',
+                        suggested.length === 3 && '@4xl:grid-cols-3'
+                    )}
+                >
+                    {suggested.map((idea, index) => (
+                        <WorkflowIdeaCard
+                            key={idea.id}
+                            idea={idea}
+                            // The list puts the best first bet first. A lone idea needs no pointer.
+                            recommended={index === 0 && suggested.length > 1}
+                        />
+                    ))}
+                </div>
+            )}
         </section>
     )
 }
