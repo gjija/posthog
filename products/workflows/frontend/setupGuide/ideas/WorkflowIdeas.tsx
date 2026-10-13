@@ -8,7 +8,7 @@ import { FEATURE_FLAGS } from 'lib/constants'
 import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
 
 import { WorkflowIdeaCard } from './WorkflowIdeaCard'
-import { WorkflowIdeaInProgressCard } from './WorkflowIdeaInProgressCard'
+import { WorkflowIdeaInProgress } from './WorkflowIdeaInProgress'
 import { workflowIdeasLogic } from './workflowIdeasLogic'
 
 /** Workflows PostHog drafted for this project from its own events, shown until each is used or dismissed. */
@@ -54,7 +54,7 @@ function WorkflowIdeasSection(): JSX.Element | null {
             {inProgress.length > 0 && (
                 <div className="flex flex-col gap-2">
                     {inProgress.map((idea) => (
-                        <WorkflowIdeaInProgressCard key={idea.id} idea={idea} hogFlowId={idea.hog_flow_id as string} />
+                        <WorkflowIdeaInProgress key={idea.id} idea={idea} hogFlowId={idea.hog_flow_id as string} />
                     ))}
                 </div>
             )}
