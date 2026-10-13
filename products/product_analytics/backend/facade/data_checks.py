@@ -15,5 +15,5 @@ from products.product_analytics.backend.facade.contracts import InsightDataCheck
 
 
 def run_insight_data_checks(query: Mapping[str, Any], *, team: Team) -> InsightDataChecks:
-    """Check the events an insight query reads for local traffic, bots and events sent twice."""
+    """Check the events an insight query reads for internal users, local traffic, bots and events sent twice."""
     return insight_data_checks.run_insight_data_checks(query, team)
