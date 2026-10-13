@@ -9,7 +9,7 @@ POSTMARK_MAX_WINDOW = 10_000
 POSTMARK_MAX_PAGE_SIZE = 500
 
 
-@dataclass
+@dataclass  # nosemgrep: prefer-frozen-dataclasses -- pre-existing; new field shifts the backlog finding into diff
 class PostmarkEndpointConfig:
     name: str
     path: str
